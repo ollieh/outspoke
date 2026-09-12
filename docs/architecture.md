@@ -130,6 +130,8 @@ Single Gradle module (app). All Kotlin source lives under app/src/main/kotlin/ (
 
 **InferenceRepository**
 
+Number formatting validates phrase boundaries before combining number words, preserving countdowns and punctuation-separated lists. Stutter and phrase cleanup retain repeated numeric tokens, including number words, so dictated codes are not shortened.
+
 - Receives Flow<AudioChunk> from AudioCaptureManager.
 - Maintains a rolling audio window (see Section 6).
 - Emits Flow<TranscriptResult> consumed by KeyboardViewModel -> TextInjector.
@@ -140,7 +142,8 @@ Single Gradle module (app). All Kotlin source lives under app/src/main/kotlin/ (
 - LifecycleService running as an Android foreground service.
 - Notification channel: outspoke_inference, notification ID 1001.
 - Owns the SpeechEngine instance; reloads on selectedModelId preference change.
-- Uses a Mutex to protect engine swaps.
+- Uses a Mutex to protect engine swaps. The repository serializes recording sessions and engine teardown, including the final decode; memory-pressure unload skips an active session.
+- Observes distinct selected model IDs so unrelated preference changes do not reload the model.
 - Exposes StateFlow<EngineState> to bound clients.
 - FileObserver on models/ directory detects newly downloaded models.
 - Stays alive independently of IME bind/unbind; shuts down only when explicitly stopped.
@@ -153,7 +156,8 @@ Single Gradle module (app). All Kotlin source lives under app/src/main/kotlin/ (
 
 - Extends InputMethodService; implements LifecycleOwner and SavedStateRegistryOwner to host Compose.
 - Hosts the keyboard UI via ImeComposeView.
-- Binds to InferenceService on keyboard show; starts an unload timer (30 s) after keyboard hidden.
+- Binds to InferenceService for the IME lifetime and starts it when shown so it can survive IME recreation.
+- Applies FLAG_KEEP_SCREEN_ON while capture is active and clears it when capture stops.
 - Forwards InputConnection changes to TextInjector and KeyboardViewModel.
 
 **TextInjector**
@@ -190,7 +194,7 @@ Single Gradle module (app). All Kotlin source lives under app/src/main/kotlin/ (
 
 **ModelDownloadManager** downloads via OkHttp with resume support, verifies SHA-256 after each file, emits ModelState.Downloading(progress).
 
-**AppPreferences** (DataStore, store name outspoke_prefs): trigger_mode (String, default HOLD), delete_button_mode (String, DELETE_ALL | DELETE_LAST_SENTENCE, default DELETE_ALL), vad_sensitivity (Float, default 0.0), selected_model_id (String), whisper_language (String, default "auto"), postprocessing_enabled (Boolean, default true), show_pipeline_diagnostics (Boolean, default false), keyboard_tutorial_shown (Boolean, default false), forced_language (String?, default null), format_numbers_as_digits (Boolean, default true), suggestion_bar_enabled (Boolean, default false), suggestion_bar_languages (String, comma-separated BCP-47 tags, default ""), suggestion_bar_dismissed (Boolean, default false), raw_mic_capture (Boolean, default false — true captures from AudioSource.UNPROCESSED to bypass AEC, needed for the speakerphone use case), preferredMicId (Int, default 0).
+**AppPreferences** (DataStore, store name outspoke_prefs): trigger_mode (String, default HOLD), trailing_space (Boolean, default false; applied once after successful recording completion), delete_button_mode (String, DELETE_ALL | DELETE_LAST_SENTENCE, default DELETE_ALL), vad_sensitivity (Float, default 0.0), selected_model_id (String), whisper_language (String, default "auto"), postprocessing_enabled (Boolean, default true), show_pipeline_diagnostics (Boolean, default false), keyboard_tutorial_shown (Boolean, default false), forced_language (String?, default null), format_numbers_as_digits (Boolean, default true), suggestion_bar_enabled (Boolean, default false), suggestion_bar_languages (String, comma-separated BCP-47 tags, default ""), suggestion_bar_dismissed (Boolean, default false), raw_mic_capture (Boolean, default false — true captures from AudioSource.UNPROCESSED to bypass AEC, needed for the speakerphone use case), preferredMicId (Int, default 0).
 
 ---
 
