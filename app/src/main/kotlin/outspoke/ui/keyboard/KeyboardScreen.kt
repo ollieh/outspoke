@@ -188,18 +188,13 @@ fun KeyboardScreen(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (uiState is KeyboardUiState.Error) {
-                        Box(modifier = Modifier.weight(1f)) {}
-                        Spacer(modifier = Modifier.width(8.dp))
-                    }
-
                     StatusIndicator(
                         uiState = uiState,
+                        modifier = Modifier.weight(1f),
                         diagnostics = diagnostics,
                         onOpenCompanionApp = onOpenCompanionApp,
                         onRetry = onRetry ?: onRecordStart,
                     )
-                    Spacer(modifier = Modifier.weight(1f))
                     IconButton(onClick = onInsertSpace, modifier = Modifier.size(48.dp)) {
                         Icon(
                             imageVector = MyIcons.SpaceBar,
@@ -563,4 +558,3 @@ private fun KeyboardScreenTransientErrorPreview() {
         uiState = KeyboardUiState.Error(KeyboardUiState.ErrorReason.TranscriptionFailed, detail = "ONNX error")
     )
 }
-

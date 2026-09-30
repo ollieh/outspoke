@@ -36,6 +36,26 @@ class TextInjectorTest {
     private lateinit var injector: TextInjector
 
     @Test
+    fun `final field recovery preserves middle sentence after a prefix correction`() {
+        injector.setPartial("We packed a blue suitcase. The taxi waited outside.")
+        injector.commitFinal("They packed the blue suitcase. The taxi waited outside. Our flight left early.")
+
+        assertThat(ic.fieldText).isEqualTo(
+            "We packed a blue suitcase. The taxi waited outside. Our flight left early."
+        )
+    }
+
+    @Test
+    fun `final single word overlap preserves composing text before appending`() {
+        injector.setPartial("We packed the blue suitcase. The taxi waited outside.")
+        injector.commitFinal("Outside. Our flight left early.")
+
+        assertThat(ic.fieldText).isEqualTo(
+            "We packed the blue suitcase. The taxi waited outside. Our flight left early."
+        )
+    }
+
+    @Test
     fun `manual space preserves composing text and subsequent transcription`() {
         injector.setPartial("hello world")
         injector.insertSpace()

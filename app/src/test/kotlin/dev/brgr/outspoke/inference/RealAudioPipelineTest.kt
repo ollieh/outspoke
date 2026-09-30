@@ -3,17 +3,21 @@ package dev.brgr.outspoke.inference
 import android.text.InputType
 import android.view.inputmethod.EditorInfo
 import dev.brgr.outspoke.audio.AudioChunk
+import dev.brgr.outspoke.audio.SileroVadFilter
 import dev.brgr.outspoke.ime.FakeInputConnection
 import dev.brgr.outspoke.ime.TextInjector
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import org.assertj.core.api.Assertions.assertThat
 import org.junit.AfterClass
 import org.junit.Assume
 import org.junit.BeforeClass
 import org.junit.Test
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.util.Locale
+import kotlin.math.sqrt
 
 /**
  * Integration tests that feed **real WAV audio through the full streaming pipeline**
@@ -80,6 +84,315 @@ class RealAudioPipelineTest {
         is TranscriptResult.Final -> result.text
         is TranscriptResult.Partial -> result.text
         else -> throw AssertionError("Expected Final, got $result")
+    }
+
+    private val countingNumbers = listOf(
+        "one|first|1(?:st)?", "two|second|2(?:nd)?", "three|third|3(?:rd)?",
+        "four|fourth|4(?:th)?", "five|fifth|5(?:th)?", "six|sixth|6(?:th)?",
+        "seven|seventh|7(?:th)?", "eight|eighth|8(?:th)?", "nine|ninth|9(?:th)?", "ten|tenth|10(?:th)?",
+    )
+
+    /** Private human-speech regression; supply the WAV via -Ptest.counting.wav, never check it in. */
+    @Test
+    fun `supplied counting recording retains every sentence across chunk offsets`() {
+        Assume.assumeTrue(modelAvailable)
+        val recording = System.getProperty("test.counting.wav")
+        Assume.assumeTrue("Supply the private counting WAV with -Ptest.counting.wav", recording != null)
+        val pcm = WavReader().readPcm16(ByteArrayInputStream(File(recording!!).readBytes()))
+        require(pcm.channels == 1)
+        val speech = WavReader().resampleLinear(pcm.samples, pcm.sampleRate, 16_000)
+        engine.setLanguage("en")
+        val expectedSentences = listOf(
+            "sentence number (one|1)", "sentence number (two|2)", "(third|3rd) sentence",
+            "(fourth|4th)", "(fifth|5th) sentence", "sentence number (six|6)",
+            "sentence number (seven|7)", "sentence number (eight|8)",
+            "(ninth|9th) sentence", "(tenth|10th) sentence",
+        )
+        fun assertSentences(stage: String, text: String) {
+            assertThat(text.lowercase()).contains("test audio", "that completes all the sentences")
+            assertThat(Regex("should have (one|1) to (ten|10)", RegexOption.IGNORE_CASE).containsMatchIn(text)).isTrue()
+            expectedSentences.forEach { sentence ->
+                assertThat(Regex("\\b($sentence)\\b", RegexOption.IGNORE_CASE).findAll(text).count())
+                    .describedAs("$stage must retain $sentence once: $text").isEqualTo(1)
+            }
+        }
+        assertSentences("one-shot", textOf(engine.transcribe(AudioChunk(speech))))
+        for (offsetMs in listOf(0, 400, 800, 1200, 1600)) {
+            val samples = ShortArray(offsetMs * 16) + speech
+            val field = FakeInputConnection()
+            val injector = TextInjector(field, EditorInfo().apply { inputType = InputType.TYPE_CLASS_TEXT })
+            val results = runBlocking {
+                InferenceRepository(engine).transcribe(flowOf(*chunkify(samples).toTypedArray())).toList()
+            }
+            assertThat(results.filterIsInstance<TranscriptResult.Failure>()).isEmpty()
+            results.forEach { result ->
+                when (result) {
+                    is TranscriptResult.Partial -> injector.setPartial(result.text)
+                    is TranscriptResult.Final -> injector.commitFinal(result.text)
+                    is TranscriptResult.WindowTrimmed -> injector.resetAfterTrim(result.stableWords)
+                    else -> Unit
+                }
+            }
+            val streamed = results.filterIsInstance<TranscriptResult.Final>().joinToString(" ") { it.text }
+            assertSentences("streaming offset=$offsetMs", streamed)
+            assertSentences("editor offset=$offsetMs", field.fieldText)
+            assertThat(field.fieldText.trim()).isEqualTo(streamed.trim())
+        }
+    }
+
+    @Test
+    fun `literal digit tokens survive streaming and text insertion`() {
+        assertNumberedSentences("natural-counting.wav", countingNumbers)
+    }
+
+    @Test
+    fun `supplied recording preserves sentences and recovered punctuation with silence filtering on and off`() {
+        Assume.assumeTrue(modelAvailable)
+        val recording = System.getProperty("test.counting.wav")
+        Assume.assumeTrue(recording != null)
+        val pcm = WavReader().readPcm16(ByteArrayInputStream(File(recording!!).readBytes()))
+        val speech = WavReader().resampleLinear(pcm.samples, pcm.sampleRate, 16_000)
+        engine.setLanguage("en")
+        for (filterSilence in listOf(false, true)) {
+            val chunks = chunkify(speech, chunkSize = 480)
+            val audio = if (!filterSilence) chunks else {
+                val model = listOf(File("src/main/res/raw/silero_vad_v4.onnx"), File("app/src/main/res/raw/silero_vad_v4.onnx"))
+                    .first { it.isFile }.readBytes()
+                val vad = SileroVadFilter(model)
+                val filtered = mutableListOf<AudioChunk>()
+                try {
+                    chunks.forEach { chunk ->
+                        val rms = sqrt(chunk.samples.sumOf { it.toDouble() * it } / chunk.samples.size) / 32767.0
+                        filtered += vad.process(chunk, rms.toFloat())
+                    }
+                    repeat(20) {
+                        if (vad.isSpeechActive) filtered += vad.process(AudioChunk(ShortArray(480)), 0f)
+                    }
+                } finally {
+                    vad.flush()
+                    vad.close()
+                }
+                filtered
+            }
+            val results = runBlocking {
+                InferenceRepository(engine).transcribe(
+                    flowOf(*audio.toTypedArray()), customWords = listOf("Kubernetes", "Astro.js"),
+                ).toList()
+            }
+            assertThat(results.filterIsInstance<TranscriptResult.Failure>()).isEmpty()
+            val finals = results.filterIsInstance<TranscriptResult.Final>()
+            val cleaned = finals.joinToString(" ") { it.text }
+            val expected = listOf(
+                "sentence number 1", "sentence number 2", "3rd sentence", "4th", "5th sentence",
+                "sentence number 6", "sentence number 7", "sentence number 8", "9th sentence", "10th sentence",
+            )
+            expected.forEach { sentence ->
+                assertThat(Regex("\\b$sentence\\b", RegexOption.IGNORE_CASE).findAll(cleaned).count())
+                    .describedAs("VAD=$filterSilence must retain $sentence once").isEqualTo(1)
+            }
+            assertThat(cleaned).contains("sentence number 8.", "9th sentence.", "should have 1 to 10.")
+            assertThat(cleaned).doesNotContain("Kubernetes", "Astro.js")
+            val field = FakeInputConnection()
+            val injector = TextInjector(field, EditorInfo().apply { inputType = InputType.TYPE_CLASS_TEXT })
+            results.forEach { result ->
+                when (result) {
+                    is TranscriptResult.Partial -> injector.setPartial(result.text)
+                    is TranscriptResult.Final -> injector.commitFinal(result.text)
+                    else -> Unit
+                }
+            }
+            assertThat(field.fieldText.trim()).isEqualTo(cleaned.trim())
+        }
+    }
+
+    @Test
+    fun `numbered sentences with short pauses do not disappear`() {
+        assertNumberedSentences("natural-counting-paused.wav", countingNumbers)
+    }
+
+    @Test
+    fun `blank carried predictor recovers speech before advancing the chunk`() {
+        assertNumberedSentences("blank-chunk-recovery.wav", countingNumbers.drop(6))
+    }
+
+    @Test
+    fun `blank chunk recovery adds no words during silence or quiet noise`() {
+        Assume.assumeTrue(modelAvailable)
+        engine.setLanguage("en")
+        val speech = wavSamples("long-appointment.wav")
+        val random = kotlin.random.Random(42)
+        val tails = listOf(ShortArray(16_000 * 12), ShortArray(16_000 * 12) { random.nextInt(-100, 101).toShort() })
+        fun transcribe(samples: ShortArray): String = runBlocking {
+            InferenceRepository(engine).transcribe(flowOf(*chunkify(samples).toTypedArray()))
+                .toList().filterIsInstance<TranscriptResult.Final>().joinToString(" ") { it.text }
+        }
+        val baseline = transcribe(speech + ShortArray(16_000 * 2))
+        assertThat(baseline.lowercase()).contains("doctor")
+        tails.forEach { tail -> assertThat(transcribe(speech + tail)).isEqualTo(baseline) }
+    }
+
+    @Test
+    fun `numbered sentences after sustained dictation survive different chunk offsets`() {
+        Assume.assumeTrue(modelAvailable)
+        engine.setLanguage("en")
+        val warmup = wavSamples("pipe-e.wav") + wavSamples("pipe-l.wav")
+        val numbered = wavSamples("numbered-sentences.wav")
+        val ordinals = listOf("first|1st", "second|2nd", "third|3rd", "fourth|4th", "fifth|5th", "sixth|6th", "seventh|7th", "eighth|8th", "ninth|9th", "tenth|10th")
+        for (offsetMs in listOf(0, 400, 800, 1200, 1600)) {
+            val samples = warmup + ShortArray(offsetMs * 16) + numbered
+            val field = FakeInputConnection()
+            val injector = TextInjector(field, EditorInfo().apply { inputType = InputType.TYPE_CLASS_TEXT })
+            val results = runBlocking {
+                InferenceRepository(engine).transcribe(flowOf(*chunkify(samples).toTypedArray())).toList()
+            }
+            results.forEach { result ->
+                when (result) {
+                    is TranscriptResult.Partial -> injector.setPartial(result.text)
+                    is TranscriptResult.Final -> injector.commitFinal(result.text)
+                    is TranscriptResult.WindowTrimmed -> injector.resetAfterTrim(result.stableWords)
+                    else -> Unit
+                }
+            }
+            val streamed = results.filterIsInstance<TranscriptResult.Final>().joinToString(" ") { it.text }
+            for ((stage, text) in listOf("streaming" to streamed, "editor" to field.fieldText)) {
+                for (ordinal in ordinals) {
+                    assertThat(Regex("\\b($ordinal)\\b", RegexOption.IGNORE_CASE).findAll(text).count())
+                        .describedAs("$stage at offset ${offsetMs}ms must retain $ordinal once: $text")
+                        .isEqualTo(1)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `all ten numbered sentences survive streaming and text insertion`() {
+        assertNumberedSentences("numbered-sentences.wav")
+    }
+
+    @Test
+    fun `all ten numbered sentences with pauses survive streaming and text insertion`() {
+        assertNumberedSentences("paced-numbered-sentences.wav")
+    }
+
+    private fun assertNumberedSentences(
+        fixture: String,
+        expectedNumbers: List<String> = listOf("first|1st", "second|2nd", "third|3rd", "fourth|4th", "fifth|5th", "sixth|6th", "seventh|7th", "eighth|8th", "ninth|9th", "tenth|10th"),
+    ) {
+        Assume.assumeTrue(modelAvailable)
+        engine.setLanguage("en")
+        val samples = wavSamples(fixture)
+        val reference = textOf(engine.transcribe(AudioChunk(samples)))
+        val field = FakeInputConnection()
+        val injector = TextInjector(field, EditorInfo().apply { inputType = InputType.TYPE_CLASS_TEXT })
+        val results = runBlocking {
+            InferenceRepository(engine).transcribe(flowOf(*chunkify(samples).toTypedArray())).toList()
+        }
+        results.forEach { result ->
+            when (result) {
+                is TranscriptResult.Partial -> injector.setPartial(result.text)
+                is TranscriptResult.Final -> injector.commitFinal(result.text)
+                is TranscriptResult.WindowTrimmed -> injector.resetAfterTrim(result.stableWords)
+                else -> Unit
+            }
+        }
+        val streamed = results.filterIsInstance<TranscriptResult.Final>().joinToString(" ") { it.text }
+        for ((stage, text) in listOf("one-shot" to reference, "streaming" to streamed, "editor" to field.fieldText)) {
+            for (ordinal in expectedNumbers) {
+                assertThat(Regex("\\b($ordinal)\\b", RegexOption.IGNORE_CASE).findAll(text).count())
+                    .describedAs("$stage must retain each numbered sentence once: $text")
+                    .isEqualTo(1)
+            }
+        }
+    }
+
+    @Test
+    fun `two sentences separated by eight seconds of silence both transcribe`() {
+        Assume.assumeTrue(modelAvailable)
+        engine.setLanguage("en")
+        val samples = wavSamples("long-appointment.wav") + ShortArray(16_000 * 8) +
+            wavSamples("long-weather.wav") + ShortArray(16_000 * 2)
+        val results = runBlocking {
+            InferenceRepository(engine).transcribe(flowOf(*chunkify(samples).toTypedArray())).toList()
+        }
+        val text = results.filterIsInstance<TranscriptResult.Final>().joinToString(" ") { it.text }.lowercase()
+        assertThat(text).contains("doctor", "weather forecast predicts rain tomorrow", "stay indoors")
+    }
+
+    @Test
+    fun `speech resumes after noisy pauses without VAD boundaries`() {
+        Assume.assumeTrue(modelAvailable)
+        engine.setLanguage("en")
+        val fixtures = listOf(
+            "med-report.wav" to "report",
+            "long-appointment.wav" to "doctor",
+            "long-weather.wav" to "weather",
+            "long-package.wav" to "package",
+        )
+        val noise = kotlin.random.Random(42)
+        val pauseSeconds = listOf(2, 8, 16, 2)
+        val chunks = fixtures.flatMapIndexed { index, (fixture, _) ->
+            val pause = ShortArray(16_000 * pauseSeconds[index]) { noise.nextInt(-100, 101).toShort() }
+            chunkify(wavSamples(fixture)) + chunkify(pause)
+        }
+        val field = FakeInputConnection()
+        val injector = TextInjector(field, EditorInfo().apply { inputType = InputType.TYPE_CLASS_TEXT })
+        val results = runBlocking {
+            InferenceRepository(engine).transcribe(flowOf(*chunks.toTypedArray())).toList()
+        }
+        assertThat(results.filterIsInstance<TranscriptResult.Failure>()).isEmpty()
+        val final = results.filterIsInstance<TranscriptResult.Final>().last().text.lowercase()
+        fixtures.forEach { (_, word) -> assertThat(final).contains(word) }
+        results.forEach { result ->
+            when (result) {
+                is TranscriptResult.Partial -> injector.setPartial(result.text)
+                is TranscriptResult.Final -> injector.commitFinal(result.text)
+                is TranscriptResult.WindowTrimmed -> injector.resetAfterTrim(result.stableWords)
+                else -> Unit
+            }
+        }
+        fixtures.forEach { (_, word) -> assertThat(field.fieldText.lowercase()).contains(word) }
+    }
+
+    @Test
+    fun `repeated recordings through VAD and Parakeet do not alternate with blank sessions`() {
+        Assume.assumeTrue(modelAvailable)
+        val vadModel = listOf(
+            File("src/main/res/raw/silero_vad_v4.onnx"),
+            File("app/src/main/res/raw/silero_vad_v4.onnx"),
+        ).first { it.isFile }.readBytes()
+        val repo = InferenceRepository(engine)
+        val previous = mutableMapOf<String, String>()
+        repeat(3) { cycle ->
+            for ((fixture, expectedWord) in listOf(
+                "long-appointment.wav" to "doctor",
+                "med-report.wav" to "report",
+                "single-yes.wav" to "yes",
+            )) {
+                val vad = SileroVadFilter(vadModel)
+                val audio = mutableListOf<AudioChunk>()
+                try {
+                    for (chunk in chunkify(wavSamples(fixture), chunkSize = 480)) {
+                        val rms = sqrt(chunk.samples.sumOf { it.toDouble() * it } / chunk.samples.size) / 32767.0
+                        audio += vad.process(chunk, rms.toFloat())
+                    }
+                    // Match AudioCaptureManager's trailing hangover drain on stop.
+                    repeat(20) {
+                        if (vad.isSpeechActive) audio += vad.process(AudioChunk(ShortArray(480)), 0f)
+                    }
+                } finally {
+                    vad.flush()
+                    vad.close()
+                }
+                val results = runBlocking { repo.transcribe(flowOf(*audio.toTypedArray())).toList() }
+                assertThat(results.filterIsInstance<TranscriptResult.Failure>()).isEmpty()
+                val text = results.filterIsInstance<TranscriptResult.Final>().joinToString(" ") { it.text }
+                assertThat(text.lowercase())
+                    .describedAs("Cycle ${cycle + 1}, $fixture must produce a transcript")
+                    .contains(expectedWord)
+                previous[fixture]?.let { assertThat(text).isEqualTo(it) }
+                previous[fixture] = text
+            }
+        }
     }
 
     @Test

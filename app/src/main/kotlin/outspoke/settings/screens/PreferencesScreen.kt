@@ -2,6 +2,8 @@ package dev.brgr.outspoke.settings.screens
 
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -9,6 +11,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -16,6 +21,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.brgr.outspoke.R
+import dev.brgr.outspoke.inference.CustomWordCorrector
 import dev.brgr.outspoke.ime.correction.SuggestionDownloadState
 import dev.brgr.outspoke.ime.correction.SuggestionLanguage
 import dev.brgr.outspoke.settings.preferences.PreferencesViewModel
@@ -39,6 +45,8 @@ fun InputPreferencesScreen(
     val triggerMode by viewModel.triggerMode.collectAsState()
     val deleteButtonMode by viewModel.deleteButtonMode.collectAsState()
     val rawMicCapture by viewModel.rawMicCapture.collectAsState()
+    val autoStartRecording by viewModel.autoStartRecording.collectAsState()
+    val returnToPreviousKeyboard by viewModel.returnToPreviousKeyboard.collectAsState()
 
     PreferencesColumn {
         MicSection(
@@ -50,6 +58,19 @@ fun InputPreferencesScreen(
         TriggerModeSection(
             triggerMode = triggerMode,
             onTriggerModeChange = viewModel::setTriggerMode,
+        )
+        HorizontalDivider()
+        KeyboardBehaviorSwitch(
+            title = stringResource(R.string.pref_auto_start_recording_title),
+            summary = stringResource(R.string.pref_auto_start_recording_summary),
+            checked = autoStartRecording,
+            onCheckedChange = viewModel::setAutoStartRecording,
+        )
+        KeyboardBehaviorSwitch(
+            title = stringResource(R.string.pref_return_keyboard_title),
+            summary = stringResource(R.string.pref_return_keyboard_summary),
+            checked = returnToPreviousKeyboard,
+            onCheckedChange = viewModel::setReturnToPreviousKeyboard,
         )
         HorizontalDivider()
         Row(
@@ -72,6 +93,27 @@ fun InputPreferencesScreen(
     }
 }
 
+@Composable
+private fun KeyboardBehaviorSwitch(
+    title: String,
+    summary: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().toggleable(
+            value = checked, role = Role.Switch, onValueChange = onCheckedChange,
+        ).padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(end = 16.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(summary, style = MaterialTheme.typography.bodyMedium)
+        }
+        Switch(checked = checked, onCheckedChange = null)
+    }
+}
+
 /**
  * Category 2 — Speech Processing.
  *
@@ -87,6 +129,7 @@ fun SpeechPreferencesScreen(
     val suggestionBarEnabled by viewModel.suggestionBarEnabled.collectAsState()
     val suggestionBarLanguages by viewModel.suggestionBarLanguages.collectAsState()
     val downloadStates by viewModel.downloadStates.collectAsState()
+    val customWords by viewModel.customWords.collectAsState()
 
     PreferencesColumn {
         VadSection(
@@ -99,6 +142,12 @@ fun SpeechPreferencesScreen(
             onPostprocessingChange = viewModel::setPostprocessingEnabled,
         )
         HorizontalDivider()
+        CustomWordsSection(
+            words = customWords,
+            onAdd = viewModel::addCustomWord,
+            onRemove = viewModel::removeCustomWord,
+        )
+        HorizontalDivider()
         SuggestionBarSection(
             suggestionBarEnabled = suggestionBarEnabled,
             suggestionBarLanguages = suggestionBarLanguages,
@@ -109,6 +158,67 @@ fun SpeechPreferencesScreen(
             onCancelDownload = viewModel::cancelDownload,
             onDeleteLanguage = viewModel::deleteLanguage,
         )
+    }
+}
+
+@Composable
+private fun CustomWordsSection(
+    words: List<String>,
+    onAdd: (String) -> Unit,
+    onRemove: (String) -> Unit,
+) {
+    var entry by rememberSaveable { mutableStateOf("") }
+    val normalized = CustomWordCorrector.normalizeWord(entry)
+    val error = when {
+        normalized.isEmpty() -> null
+        words.size >= CustomWordCorrector.MAX_WORDS -> R.string.pref_custom_words_limit
+        normalized.length > CustomWordCorrector.MAX_LENGTH || normalized.split(' ').size > 3 ||
+            normalized.none(Char::isLetter) -> R.string.pref_custom_words_invalid
+        CustomWordCorrector.normalizeWords(words + normalized).size == words.size -> R.string.pref_custom_words_duplicate
+        else -> null
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(stringResource(R.string.pref_custom_words_title), style = MaterialTheme.typography.titleMedium)
+        Text(
+            stringResource(R.string.pref_custom_words_summary),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = entry,
+            onValueChange = { entry = it },
+            label = { Text(stringResource(R.string.pref_custom_words_label)) },
+            placeholder = { Text(stringResource(R.string.pref_custom_words_example)) },
+            singleLine = true,
+            isError = error != null,
+            supportingText = error?.let { message -> { Text(stringResource(message)) } },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(
+            onClick = { onAdd(normalized); entry = "" },
+            enabled = normalized.isNotEmpty() && error == null,
+            modifier = Modifier.align(Alignment.End),
+        ) {
+            Text(stringResource(R.string.pref_custom_words_add))
+        }
+        if (words.isEmpty()) {
+            Text(
+                stringResource(R.string.pref_custom_words_empty),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        words.forEach { word ->
+            val removeLabel = stringResource(R.string.pref_custom_words_remove_label, word)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(word, modifier = Modifier.weight(1f).padding(end = 8.dp))
+                TextButton(onClick = { onRemove(word) }, modifier = Modifier.semantics {
+                    contentDescription = removeLabel
+                }) {
+                    Text(stringResource(R.string.pref_custom_words_remove))
+                }
+            }
+        }
     }
 }
 

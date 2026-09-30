@@ -24,12 +24,17 @@ It uses NVIDIA's [Parakeet-TDT v3](https://huggingface.co/nvidia/parakeet-tdt-0.
 
 - **Fully offline after setup** - audio is never transmitted anywhere
 - **Real-time transcription** - progressive partial results while you speak
+- **Live keyboard preview** - review recognition as you speak. Outspoke inserts the complete recording once after Stop, keeps the preview visible while finishing, and combines sentences across pauses.
 - **Works in any app** - injects text via Android's standard `InputConnection` API
 - **Parakeet-TDT 0.6B v3** - INT8 quantized, ~700 MB, runs on mid-range hardware
+- **Parakeet Unified EN 0.6B, experimental** - English-only streaming model in debug builds, ~663 MB download. Select it under Models. Uses the trained 1.12-second streaming profile; Android performance still needs device testing.
 - **Voice Activity Detection** - Silero VAD v4 neural network (ONNX) filters silence before it reaches the ASR model; falls back to energy detection if the model cannot load or fails during recording
 - **Number formatting** - converts number phrases to digits while preserving countdowns, lists, and repeated digits
+- **Custom words** - save names and terms in Speech preferences. Close recognized spellings and split phrases use your preferred spelling locally, without a language-pack download. Up to 100 terms, each up to 3 words and 50 characters; changes apply to the next recording.
 - **Space key** - insert a space directly from the keyboard
 - **Optional space after dictation** - enable it in Input preferences to append one space when the complete recording finishes, including its final transcription
+- **Optional automatic recording** - start listening when Outspoke opens and the model is ready
+- **Return to your previous keyboard** - optionally switch back after closing Outspoke, once final transcription finishes
 - **Screen stays awake while recording** - normal screen timeout resumes when capture stops
 - **Warm model** - the foreground service retains the model between keyboard openings; memory-pressure cleanup skips active recording and final transcription. Android can still reclaim the process.
 - **Configurable trigger modes** - hold-to-talk or tap-to-toggle
@@ -104,9 +109,10 @@ Outspoke is structured as a clean layered pipeline. The `SpeechEngine` interface
 | Package | Class | Role |
 |---|---|---|
 | `inference` | `SpeechEngine` | Interface - model-agnostic contract for loading, transcribing, and closing any ASR engine |
+| `inference` | `ParakeetUnifiedEngine`, `NemoLogMel` | English RNN-T streaming with model-owned context windows and on-device log-mel extraction |
 | `inference` | `ParakeetEngine` | Implements `SpeechEngine` using three ONNX sessions (preprocessor → encoder → decoder/joint) |
 | `inference` | `InferenceService` | `LifecycleService` that owns the engine and exposes `InferenceRepository` to bound clients |
-| `inference` | `InferenceRepository` | Sliding-window inference driver: buffers audio chunks, waits for ≥ 2 s of context, then fires a partial inference every 1 s up to a 30 s hard ceiling; tracks the last 3 partials and performs **stable-chunk trims** when a common leading-word prefix is confirmed, emitting `TranscriptResult.WindowTrimmed` to `TextInjector`; force-trims on divergence loops (> 12 s) and silence runs (2 consecutive blank strides); applies a **post-processing pipeline** to every raw transcript (filler-word removal, stutter collapse ≥ 3×, phrase-loop deduplication, leading-dot / leading-punct stripping, trailing-dot normalisation, missing sentence-space repair, sentence-boundary capitalisation) |
+| `inference` | `InferenceRepository` | Parakeet uses two-second chunks with four-second lookahead and overlap recovery for missing speech. Other engines use the sliding-window driver: buffers audio chunks, waits for ≥ 2 s of context, then fires a partial inference every 1 s up to a 30 s hard ceiling; tracks the last 3 partials and performs **stable-chunk trims** when a common leading-word prefix is confirmed, emitting `TranscriptResult.WindowTrimmed` to `TextInjector`; force-trims on divergence loops (> 12 s) and silence runs (2 consecutive blank strides); applies a **post-processing pipeline** to every raw transcript (filler-word removal, stutter collapse ≥ 3×, phrase-loop deduplication, leading-dot / leading-punct stripping, trailing-dot normalisation, missing sentence-space repair, sentence-boundary capitalisation) |
 | `audio` | `AudioCaptureManager` | Opens `AudioRecord` with the vendor-recommended DEFAULT source, emits 30 ms `AudioChunk`s as a cold `Flow`; applies the calibration-selected microphone when set; drains hardware buffer and VAD hangover on stop |
 | `audio` | `VadFilter` | Interface - common contract for VAD implementations (process, flush, isSpeechActive) |
 | `audio` | `SileroVadFilter` | Neural VAD using Silero v4 (ONNX); preserves RNN state across chunks; primary filter when model is available |
@@ -130,7 +136,9 @@ Outspoke is structured as a clean layered pipeline. The `SpeechEngine` interface
 4. **`decoder_joint-model.int8.onnx`** - greedy TDT decoding with LSTM state carry-over
 5. Token IDs are mapped to text via `vocab.txt`
 
-Partial results are emitted every ~1 s once ≥ 2 s of audio is in the rolling window; the window grows up to a hard 30 s ceiling. After every partial the last 3 results are compared - if their leading words form a stable common prefix, the corresponding audio is trimmed from the front of the window (retaining 4 s of tail context) and `TranscriptResult.WindowTrimmed` is emitted so `TextInjector` can re-anchor its alignment state. Silence runs (2 consecutive blank strides) and divergence loops (window > 12 s with no common prefix) trigger unconditional force-trims. Every raw transcript passes through an 8-step post-processing pipeline before emission: filler-word removal → stutter collapse (≥ 3× repeats) → phrase-loop deduplication → leading-dot strip → leading-punct strip → multi-dot normalisation → missing sentence-space repair → sentence-boundary capitalisation. A final inference pass runs over the entire remaining window when recording stops; clips shorter than 1.25 s are zero-padded to give the encoder sufficient frames.
+Parakeet processes two-second chunks with four seconds of lookahead, so the first live text can appear after about six seconds plus inference time. If a chunk produces no words, a bounded retry re-decodes preceding audio and matches the existing transcript before appending recovered speech. Stopping flushes the remaining audio immediately.
+
+For other engines, partial results are emitted every ~1 s once ≥ 2 s of audio is in the rolling window; the window grows up to a hard 30 s ceiling. After every partial the last 3 results are compared - if their leading words form a stable common prefix, the corresponding audio is trimmed from the front of the window (retaining 4 s of tail context) and `TranscriptResult.WindowTrimmed` is emitted so `TextInjector` can re-anchor its alignment state. Silence runs (2 consecutive blank strides) and divergence loops (window > 12 s with no common prefix) trigger unconditional force-trims. Every raw transcript passes through an 8-step post-processing pipeline before emission: filler-word removal → stutter collapse (≥ 3× repeats) → phrase-loop deduplication → leading-dot strip → leading-punct strip → multi-dot normalisation → missing sentence-space repair → sentence-boundary capitalisation. A final inference pass runs over the entire remaining window when recording stops; clips shorter than 1.25 s are zero-padded to give the encoder sufficient frames.
 
 ---
 

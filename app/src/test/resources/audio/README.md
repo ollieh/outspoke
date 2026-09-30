@@ -51,6 +51,19 @@ real human voice recordings are committed to this repository.
 | `single-thankyou.wav` | "Thank you." | ~0.7 s | Piper TTS |
 | `german-hallo.wav` | German utterance containing "hallo" | ~1.7 s | Piper TTS (de_DE-thorsten-medium) |
 | `multi-4sent.wav` | four sentences concatenated with pauses (no-loss/no-duplication battery) | ~10.9 s | Piper TTS + ffmpeg |
+| `numbered-sentences.wav` | "This is the first sentence" through "This is the tenth sentence" | ~15 s | Piper TTS (en_US-lessac-medium) |
+| `paced-numbered-sentences.wav` | Same numbered sentences with 1.2 s pauses | 26.65 s | Piper TTS (en_US-lessac-medium) |
+| `natural-counting.wav` | Ten varied sentences numbered one through ten, with 200 ms leading silence | 18.37 s | Piper TTS (en_US-lessac-medium), line-by-line synthesis, linear resampling to 16 kHz |
+| `natural-counting-paused.wav` | Same ten sentences, with 1.8 s silence after each | 36.37 s | Same source as `natural-counting.wav` |
+| `blank-chunk-recovery.wav` | Last four natural-counting sentences, preserving the paused recording's chunk alignment | 16.37 s | Same source, with 17,235 leading silence samples |
+
+The natural-counting fixtures say: "This is sentence number one. Now we're on
+sentence number two. This is sentence number three. We've got the sentence number
+four. This is the fifth sentence. This is the sixth sentence. This is actually the
+seventh sentence. This is the eighth sentence. And this sentence is number nine.
+And now we've finally made it to sentence number ten."
+The unpaused recording reproduced stripped digit tokens; the paused recordings
+reproduced a whole missing ninth sentence with the carried streaming predictor.
 
 ## Multi-Sentence Pipeline Fixtures
 
@@ -93,7 +106,25 @@ done
 ./gradlew testDebugUnitTest
 ```
 
-Expected runtime: ~30–60 s on a desktop CPU (INT8, 2 intra-op threads).
+Individual recordings take seconds; the full real-model suites take several
+minutes on a desktop CPU (INT8, 2 intra-op threads).
+
+The human counting regression uses an external, private recording rather than a
+checked-in voice sample. After converting the supplied recording to mono PCM WAV,
+run it with:
+
+```bash
+./gradlew testDebugUnitTest -Ptest.model.dir=/path/to/parakeet-v3 \
+  -Ptest.counting.wav=/private/path/counting.wav \
+  --tests '*RealAudioPipelineTest.supplied*'
+```
+
+These tests expect the specific ten-sentence recording supplied during debugging.
+The first checks every numbered sentence in the one-shot transcript and in streaming
+output and editor text at five offsets across a two-second chunk. A second test
+checks silence filtering on and off, recovered sentence punctuation, and an unrelated
+custom vocabulary. Both skip when the recording is not supplied. Keep the voice
+recording outside the repository.
 
 ## Generating Synthetic Fixtures
 

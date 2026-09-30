@@ -26,6 +26,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import dev.brgr.outspoke.R
 import dev.brgr.outspoke.inference.PipelineDiagnostics
 import dev.brgr.outspoke.ui.keyboard.KeyboardUiState
@@ -38,7 +39,7 @@ import dev.brgr.outspoke.ui.theme.OutspokeKeyboardTheme
  * - [KeyboardUiState.Idle]          → small grey mic icon (+ diagnostics badge if non-clean)
  * - [KeyboardUiState.Listening]     → pulsing filled circle (accent colour)
  * - [KeyboardUiState.Processing]    → spinner + partial transcript text
- * - [KeyboardUiState.Transcribing]  → spinner + "Transcribing…" label (mic off, engine busy)
+ * - [KeyboardUiState.Transcribing]  → transcript preview + "Finishing…" label
  * - [KeyboardUiState.Error]         → warning icon + error message + recovery action(s)
  * - [KeyboardUiState.EngineLoading] → spinner + loading message + "Open Outspoke" action
  *
@@ -76,18 +77,22 @@ fun StatusIndicator(
             is KeyboardUiState.Idle -> IdleIndicator(diagnostics = diagnostics)
             is KeyboardUiState.Listening -> ListeningIndicator()
             is KeyboardUiState.Processing -> ProcessingIndicator(partial = state.partial)
-            is KeyboardUiState.Transcribing -> TranscribingIndicator()
+            is KeyboardUiState.Transcribing -> TranscribingIndicator(state.partial)
             is KeyboardUiState.Error -> {
                 val isTransient = state.reason in setOf(
                     KeyboardUiState.ErrorReason.TranscriptionFailed,
+                    KeyboardUiState.ErrorReason.TextInsertionFailed,
                     KeyboardUiState.ErrorReason.AudioCaptureFailed,
                     KeyboardUiState.ErrorReason.MicInitFailed,
                 )
-                ErrorIndicator(
-                    message = localizedErrorMessage(state),
-                    onOpenCompanionApp = if (isTransient) null else onOpenCompanionApp,
-                    onRetry = if (isTransient) onRetry else null,
-                )
+                Column {
+                    if (state.partial.isNotEmpty()) TranscriptPreview(state.partial)
+                    ErrorIndicator(
+                        message = localizedErrorMessage(state),
+                        onOpenCompanionApp = if (isTransient) null else onOpenCompanionApp,
+                        onRetry = if (isTransient) onRetry else null,
+                    )
+                }
             }
 
             is KeyboardUiState.EngineLoading -> EngineLoadingIndicator(
@@ -108,6 +113,7 @@ private fun localizedErrorMessage(state: KeyboardUiState.Error): String {
             KeyboardUiState.ErrorReason.MicPermissionDenied -> R.string.status_error_mic_permission
             KeyboardUiState.ErrorReason.MicInitFailed -> R.string.status_error_mic_init
             KeyboardUiState.ErrorReason.TranscriptionFailed -> R.string.status_error_transcription
+            KeyboardUiState.ErrorReason.TextInsertionFailed -> R.string.status_error_insertion
             KeyboardUiState.ErrorReason.AudioCaptureFailed -> R.string.status_error_audio_capture
             KeyboardUiState.ErrorReason.EngineLoadFailed -> R.string.status_error_engine_load
         }
@@ -176,9 +182,12 @@ private fun ProcessingIndicator(partial: String) {
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = partial,
+                modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.StartEllipsis,
             )
         }
     }
@@ -186,17 +195,32 @@ private fun ProcessingIndicator(partial: String) {
 
 /** Shown after the mic stops while the engine is still running its final inference pass. */
 @Composable
-private fun TranscribingIndicator() {
+private fun TranscribingIndicator(partial: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         GradientArcSpinner(modifier = Modifier.size(16.dp))
         Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = stringResource(R.string.status_transcribing),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            if (partial.isNotEmpty()) TranscriptPreview(partial)
+            Text(
+                text = stringResource(R.string.status_transcribing),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+        }
     }
+}
+
+@Composable
+private fun TranscriptPreview(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurface,
+        maxLines = 1,
+        softWrap = false,
+        overflow = TextOverflow.StartEllipsis,
+    )
 }
 
 /** Shown briefly when the model detected audio but couldn't resolve a word. */
@@ -363,7 +387,7 @@ private fun StatusProcessingPreview() {
 @Composable
 private fun StatusTranscribingPreview() {
     OutspokeKeyboardTheme {
-        StatusIndicator(uiState = KeyboardUiState.Transcribing)
+        StatusIndicator(uiState = KeyboardUiState.Transcribing("The quick brown fox…"))
     }
 }
 

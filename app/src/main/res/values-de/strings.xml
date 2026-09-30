@@ -123,7 +123,8 @@
     <string name="notif_engine_failed">Engine konnte nicht geladen werden: %s</string>
 
     <!-- Keyboard status messages -->
-    <string name="status_transcribing">Wird transkribiert …</string>
+    <string name="status_transcribing">Wird abgeschlossen …</string>
+    <string name="status_error_insertion">Der Text konnte nicht eingefügt werden.</string>
     <string name="status_engine_model_missing">Modell nicht heruntergeladen - Outspoke öffnen</string>
     <string name="status_engine_loading">Transkriptions-Engine wird geladen …</string>
     <string name="status_error_mic_permission">Mikrofonberechtigung fehlt - Outspoke öffnen</string>
@@ -163,4 +164,3 @@
         lauten Räumen etwas weniger saubere Aufnahme.
     </string>
 </resources>
-

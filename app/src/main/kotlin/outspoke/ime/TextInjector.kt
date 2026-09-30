@@ -10,6 +10,7 @@ import dev.brgr.outspoke.ime.TranscriptAligner.splitToWords
 import dev.brgr.outspoke.ime.TranscriptAligner.stripComposingOverlap
 import dev.brgr.outspoke.ime.TranscriptAligner.wordsMatch
 import dev.brgr.outspoke.ui.keyboard.WordAtCursor
+import dev.brgr.outspoke.inference.RecordingTrace
 
 private const val TAG = "TextInjector"
 
@@ -77,6 +78,9 @@ private const val TRIM_COMPOSING_DROP_TAIL = 2
 /**
  * Thin wrapper around [InputConnection] that writes transcribed text into the focused
  * text field, handling the composing-text lifecycle correctly.
+ *
+ * Recording completion uses [insertTranscript] for one editor commit. The
+ * composing and alignment methods below remain available to legacy callers.
  *
  * **Composing text** (shown underlined, not yet committed) is used only when the editor
  * is a text-class field and is not a password variant. All other field types receive
@@ -274,6 +278,7 @@ class TextInjector(
      * absorbed into [committedWords] so the next successful partial does not re-commit them.
      */
     fun setPartial(text: String) {
+        RecordingTrace.log { "inject partial chars=${text.length} unchanged=${text == lastPartial} supportsComposing=$supportsComposing committedWords=${committedWords.size} composingWords=${composingWords.size}" }
         if (!supportsComposing || text == lastPartial) return
         lastPartial = text
 
@@ -505,6 +510,19 @@ class TextInjector(
         }
     }
 
+    /** Inserts a finished recording in one editor transaction, including separators. */
+    fun insertTranscript(text: String, addTrailingSpace: Boolean): Boolean {
+        val cleaned = displayCleanFn(text, true).trim()
+        if (cleaned.isEmpty()) return false
+        val before = inputConnection.getTextBeforeCursor(1, 0)
+        val separator = if (!hasActiveSelection() && !before.isNullOrEmpty() &&
+            !before.last().isWhitespace()) " " else ""
+        val trailing = if (addTrailingSpace && supportsComposing) " " else ""
+        val accepted = inputConnection.commitText(separator + cleaned + trailing, 1)
+        RecordingTrace.log { "insert recording chars=${cleaned.length} accepted=$accepted" }
+        return accepted
+    }
+
     /**
      * Commit [text] as final, confirmed text.
      *
@@ -531,6 +549,7 @@ class TextInjector(
      * next recording session within the same input field.
      */
     fun commitFinal(text: String) {
+        RecordingTrace.log { "inject final chars=${text.length} committedWords=${committedWords.size} composingWords=${composingWords.size}" }
         lastPartial = ""
         val savedCommitted = committedWords.toList()
         val savedComposing = composingWords          // Saved before reset - needed for composing-anchor fallback
@@ -648,6 +667,10 @@ class TextInjector(
                 val fieldRemaining = findNewContent(fieldWords, finalDisplayWords)
                 if (fieldRemaining.isNotEmpty()) {
                     Log.d(TAG, "[COMMIT_FINAL] field-based recovery: +${fieldRemaining.size} new words")
+                    // The field anchor includes composing text. Preserve it before
+                    // appending, since commitText would replace that entire span.
+                    inputConnection.finishComposingText()
+                    ensureSeparatorSpace()
                     inputConnection.commitText(fieldRemaining.joinToString(" "), 1)
                 } else {
                     // Recovery layer 2: complete alignment failure.
@@ -663,6 +686,8 @@ class TextInjector(
                         ) {
                             val toAppend = finalDisplayWords.drop(overlap).joinToString(" ")
                             if (toAppend.isNotBlank()) {
+                                inputConnection.finishComposingText()
+                                ensureSeparatorSpace()
                                 Log.d(
                                     TAG,
                                     "[COMMIT_FINAL] suffix fallback: +${finalDisplayWords.size - overlap} word(s) beyond field tail"

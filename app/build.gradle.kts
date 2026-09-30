@@ -200,4 +200,9 @@ dependencies {
 tasks.withType<Test> {
     maxHeapSize = "2G"
     systemProperty("test.model.dir", project.findProperty("test.model.dir") as String?)
+    systemProperty("test.unified.model.dir", project.findProperty("test.unified.model.dir") as String?)
+    project.findProperty("test.counting.wav")?.toString()?.let { recording ->
+        systemProperty("test.counting.wav", recording)
+        inputs.file(recording)
+    }
 }

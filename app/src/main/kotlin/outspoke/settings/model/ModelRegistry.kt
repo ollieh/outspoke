@@ -1,5 +1,7 @@
 package dev.brgr.outspoke.settings.model
 
+import dev.brgr.outspoke.BuildConfig
+
 private const val PARAKEET_BASE =
     "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main"
 
@@ -93,11 +95,11 @@ data class ModelInfo(
  */
 object ModelRegistry {
 
-    //    val all: List<ModelInfo> = listOf(parakeetV3, voxtralMini, whisperLargeV3Turbo)
-    val all: List<ModelInfo> =
-        listOf(parakeetV3) // for now removed voxtralMini and whisperLargeV3Turbo as I could not get it to run on-device within reasonable resource limits
+    // Unified remains a debug option until validated on an Android device.
+    val all: List<ModelInfo> = listOf(parakeetV3) +
+        if (BuildConfig.DEBUG) listOf(parakeetUnified) else emptyList()
 
-    private val byId: Map<ModelId, ModelInfo> = all.associateBy { it.id }
+    private val byId: Map<ModelId, ModelInfo> = (all + parakeetUnified).associateBy { it.id }
 
     /** Returns the [ModelInfo] for [id], throwing if the ID is not registered. */
     operator fun get(id: ModelId): ModelInfo =
@@ -139,6 +141,30 @@ private val parakeetV3 = ModelInfo(
         "config.json",
         "vocab.txt",
     ),
+)
+
+private val parakeetUnified = ModelInfo(
+    id = ModelId.PARAKEET_UNIFIED_EN,
+    displayName = "Parakeet Unified EN 0.6B (Experimental)",
+    description = "English-only streaming recognition with punctuation. " +
+        "Updates as you speak using a 1.12-second audio context. Phone performance is under evaluation.",
+    approximateSizeMb = 663,
+    source = DownloadSource.Files(
+        baseUrl = "https://huggingface.co/csukuangfj2/" +
+            "sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-streaming-1120ms/resolve/" +
+            "615bf8c5ad39692dc96cf1105afde73ec3eb2a59",
+        files = listOf(
+            RemoteFile("encoder.int8.onnx", 0.9864f,
+                "1c03f1192de41771384af22972ca10203613ba56197a024f275b86727cd35911"),
+            RemoteFile("decoder.int8.onnx", 0.0109f,
+                "34fea72425d2506600772ba191a6d3f99c0710abdb68d9a3dc89fa8cb2aa473a"),
+            RemoteFile("joiner.int8.onnx", 0.0026f,
+                "869f43f7d24595c55581ad3bf249a935fb8a71389fbdaa7504b9f46f93140f8a"),
+            RemoteFile("tokens.txt", 0.0001f,
+                "dc0b4584ab2e4ddbf888425c076c61b736e7356a015250db7d307e6f1a8188ff"),
+        ),
+    ),
+    requiredFiles = listOf("encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"),
 )
 
 // Q4-quantised variant: audio_encoder_q4 (661 MB) + embed_tokens_q4 (258 MB)
@@ -229,4 +255,3 @@ private val whisperLargeV3Turbo = ModelInfo(
         "tokenizer.json",
     ),
 )
-

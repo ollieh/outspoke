@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import dev.brgr.outspoke.settings.model.ModelId
+import dev.brgr.outspoke.inference.CustomWordCorrector
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -18,6 +19,39 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
  * Instantiate with application context to avoid memory leaks.
  */
 class AppPreferences(private val context: Context) {
+
+    private val keyCustomWords = stringSetPreferencesKey("custom_words")
+    val customWords: Flow<List<String>> = context.dataStore.data.map {
+        (it[keyCustomWords] ?: emptySet()).sortedWith(String.CASE_INSENSITIVE_ORDER)
+    }
+
+    suspend fun addCustomWord(word: String) {
+        context.dataStore.edit { prefs ->
+            prefs[keyCustomWords] = CustomWordCorrector.normalizeWords(
+                (prefs[keyCustomWords] ?: emptySet()) + word,
+            ).toSet()
+        }
+    }
+
+    suspend fun removeCustomWord(word: String) {
+        context.dataStore.edit { prefs ->
+            prefs[keyCustomWords] = (prefs[keyCustomWords] ?: emptySet()) - word
+        }
+    }
+
+    private val keyAutoStartRecording = booleanPreferencesKey("auto_start_recording")
+    val autoStartRecording: Flow<Boolean> = context.dataStore.data.map { it[keyAutoStartRecording] ?: false }
+
+    suspend fun setAutoStartRecording(enabled: Boolean) {
+        context.dataStore.edit { it[keyAutoStartRecording] = enabled }
+    }
+
+    private val keyReturnToPreviousKeyboard = booleanPreferencesKey("return_to_previous_keyboard")
+    val returnToPreviousKeyboard: Flow<Boolean> = context.dataStore.data.map { it[keyReturnToPreviousKeyboard] ?: false }
+
+    suspend fun setReturnToPreviousKeyboard(enabled: Boolean) {
+        context.dataStore.edit { it[keyReturnToPreviousKeyboard] = enabled }
+    }
 
     private val keyTrailingSpace = booleanPreferencesKey("trailing_space")
 

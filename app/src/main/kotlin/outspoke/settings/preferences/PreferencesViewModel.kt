@@ -16,6 +16,34 @@ class PreferencesViewModel(application: Application) : AndroidViewModel(applicat
     private val prefs = AppPreferences(application)
     private val downloader = SuggestionFileDownloader()
 
+    val customWords = prefs.customWords.stateIn(
+        viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList(),
+    )
+
+    fun addCustomWord(word: String) {
+        viewModelScope.launch { prefs.addCustomWord(word) }
+    }
+
+    fun removeCustomWord(word: String) {
+        viewModelScope.launch { prefs.removeCustomWord(word) }
+    }
+
+    val autoStartRecording = prefs.autoStartRecording.stateIn(
+        viewModelScope, SharingStarted.WhileSubscribed(5_000), false,
+    )
+
+    fun setAutoStartRecording(enabled: Boolean) {
+        viewModelScope.launch { prefs.setAutoStartRecording(enabled) }
+    }
+
+    val returnToPreviousKeyboard = prefs.returnToPreviousKeyboard.stateIn(
+        viewModelScope, SharingStarted.WhileSubscribed(5_000), false,
+    )
+
+    fun setReturnToPreviousKeyboard(enabled: Boolean) {
+        viewModelScope.launch { prefs.setReturnToPreviousKeyboard(enabled) }
+    }
+
     val trailingSpace = prefs.trailingSpace.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5_000), false,
     )

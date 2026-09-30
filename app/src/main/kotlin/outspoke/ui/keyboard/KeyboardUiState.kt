@@ -10,16 +10,15 @@ sealed class KeyboardUiState {
 
     /**
      * Audio has been sent to the inference engine.
-     * [partial] holds the most recent in-progress transcript shown as composing text.
+     * [partial] holds the complete recording preview, including completed utterances.
      */
     data class Processing(val partial: String) : KeyboardUiState()
 
     /**
      * Audio capture has ended; the engine is running its final (definitive) inference
-     * pass over the complete recording.  The mic button is idle but the talk button is
-     * disabled while we wait for the transcript.  No partial text is available yet.
+     * pass. The talk button is disabled; [partial] keeps the recording preview visible.
      */
-    object Transcribing : KeyboardUiState()
+    data class Transcribing(val partial: String = "") : KeyboardUiState()
 
     /**
      * The model detected audio but could not resolve a word (e.g. a short utterance whose
@@ -33,7 +32,7 @@ sealed class KeyboardUiState {
      * [detail] carries an optional technical detail (e.g. exception message) for
      * additional context.
      */
-    data class Error(val reason: ErrorReason, val detail: String? = null) : KeyboardUiState()
+    data class Error(val reason: ErrorReason, val detail: String? = null, val partial: String = "") : KeyboardUiState()
 
     /**
      * The inference engine is not yet ready (model missing or still loading).
@@ -47,6 +46,7 @@ sealed class KeyboardUiState {
         MicPermissionDenied,
         MicInitFailed,
         TranscriptionFailed,
+        TextInsertionFailed,
         AudioCaptureFailed,
         EngineLoadFailed,
     }

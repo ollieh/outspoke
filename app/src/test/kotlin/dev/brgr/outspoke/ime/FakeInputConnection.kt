@@ -23,6 +23,9 @@ import android.view.inputmethod.*
  * All other [InputConnection] methods are no-op stubs that return false / null / 0.
  */
 class FakeInputConnection : InputConnection {
+    val commitCalls = mutableListOf<String>()
+    var composingCalls = 0
+        private set
 
     /** Permanently committed text - never rewritten once written. */
     private val buffer = StringBuilder()
@@ -66,6 +69,7 @@ class FakeInputConnection : InputConnection {
      * [commitText] semantics where the composing region is cleared first).
      */
     override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
+        commitCalls += text.toString()
         // Replace active selection if one exists.
         if (selStart >= 0 && selEnd >= selStart) {
             val s = selStart.coerceIn(0, buffer.length)
@@ -94,6 +98,7 @@ class FakeInputConnection : InputConnection {
      * position is unchanged).
      */
     override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
+        composingCalls++
         if (composingStart < 0) composingStart = buffer.length
         composing = text.toString()
         return true
@@ -134,8 +139,8 @@ class FakeInputConnection : InputConnection {
         return full.substring(cursor, minOf(full.length, cursor + n))
     }
 
-    /** No selection is ever active in this fake. */
-    override fun getSelectedText(flags: Int): CharSequence? = null
+    override fun getSelectedText(flags: Int): CharSequence? =
+        if (selStart >= 0 && selEnd > selStart) buffer.substring(selStart, selEnd) else null
 
     /**
      * Sets the selection range.  When [start] == [end] this positions the cursor
@@ -187,5 +192,3 @@ class FakeInputConnection : InputConnection {
         opts: Bundle?,
     ): Boolean = false
 }
-
-

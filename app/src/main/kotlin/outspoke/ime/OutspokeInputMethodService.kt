@@ -8,6 +8,7 @@ import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
@@ -20,6 +21,7 @@ import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import dev.brgr.outspoke.audio.AudioCaptureManager
+import dev.brgr.outspoke.BuildConfig
 import dev.brgr.outspoke.audio.PermissionHelper
 import dev.brgr.outspoke.inference.EngineState
 import dev.brgr.outspoke.inference.InferenceService
@@ -108,10 +110,10 @@ class OutspokeInputMethodService :
             engineStateCollector?.cancel()
             engineStateCollector = lifecycleScope.launch {
                 b.getEngineState().collect { state ->
-                    keyboardViewModel.setEngineState(state)
                     keyboardViewModel.setInferenceRepository(
                         if (state == EngineState.Ready) b.getRepository() else null
                     )
+                    keyboardViewModel.setEngineState(state)
                 }
             }
 
@@ -165,6 +167,16 @@ class OutspokeInputMethodService :
                 wordSuggestionProvider,
             ),
         )[KeyboardViewModel::class.java]
+
+        keyboardViewModel.onReturnToPreviousKeyboard = {
+            val selected = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+            // A manual switch may already have selected another IME while we finished.
+            if (selected != null && ComponentName.unflattenFromString(selected) ==
+                ComponentName(this, OutspokeInputMethodService::class.java)
+            ) {
+                switchToPreviousInputMethod()
+            }
+        }
 
         lifecycleScope.launch {
             keyboardViewModel.isRecording.collect { recording ->
@@ -238,6 +250,7 @@ class OutspokeInputMethodService :
 
     override fun onWindowHidden() {
         super.onWindowHidden()
+        keyboardViewModel.onKeyboardHidden()
         Log.d(TAG, "onWindowHidden barVisible=$barVisible")
         // Cancel any pending bar-shrink. The bar's visible state must be preserved as-is
         // while the keyboard is hidden — it is restored from barVisible when onWindowShown
@@ -494,9 +507,21 @@ class OutspokeInputMethodService :
      */
     override fun onEvaluateFullscreenMode(): Boolean = false
 
+    override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        keyboardViewModel.onKeyboardShown()
+    }
+
     override fun onFinishInputView(finishingInput: Boolean) {
         Log.d(TAG, "onFinishInputView finishingInput=$finishingInput barVisible=$barVisible")
-        super.onFinishInputView(finishingInput)
+        if (finishingInput) {
+            keyboardViewModel.onInputFinished()
+            super.onFinishInputView(finishingInput)
+        } else {
+            // Hiding the keyboard in the same field still finishes the recording.
+            keyboardViewModel.onRecordStop()
+            super.onFinishInputView(finishingInput)
+        }
         imeComposeView = null
     }
 
@@ -530,25 +555,13 @@ class OutspokeInputMethodService :
         val connection = currentInputConnection ?: return
         keyboardViewModel.setTextInjector(
             TextInjector(
-                connection,
+                if (BuildConfig.DEBUG) TracingInputConnection(connection) else connection,
                 attribute ?: EditorInfo(),
-                // Display-clean with the user's current language so the field gets the same
-                // language-aware cleaning the repository's partial/final cleaning uses
-                // (filler removal, number normalisation, structural). Reading the
-                // StateFlow snapshot here is safe — currentLanguage is collected eagerly and
-                // always has a value.
-                //
-                // isSentenceStart tells the cleaner whether the chunk head begins a
-                // sentence: without it every frozen chunk / composing span would be
-                // capitalised mid-sentence (the cleaner capitalises its first word).
-                //
-                // skipSpuriousPeriods: the spurious-period filter already ran on the FULL
-                // transcript in the repository (partial + final). Re-running it here on a
-                // frozen substring would misfire on the substring's first segment (the tail
-                // of a longer sentence) and delete a genuine sentence-final period, so it
-                // is skipped — the authoritative full-text periods are preserved.
+                // Streaming results already include cleanup and custom vocabulary.
+                // Cleaning frozen fragments again can alter saved spelling or remove
+                // valid punctuation. Legacy engines still need display cleanup.
                 displayCleanFn = { text, isSentenceStart ->
-                    text.cleanTranscript(
+                    if (keyboardViewModel.transcriptAlreadyCleaned) text else text.cleanTranscript(
                         isContinuation = !isSentenceStart,
                         language = keyboardViewModel.currentLanguage.value,
                         skipSpuriousPeriods = true,
@@ -569,8 +582,8 @@ class OutspokeInputMethodService :
      * Strategy: the update is only interesting when the cursor moves to (0, 0).  We then
      * do a cheap two-byte IPC read to confirm the field is genuinely empty (as opposed to
      * the user merely clicking at the very start of a non-empty field).  If it is empty we
-     * forward to [KeyboardViewModel.onFieldCleared], which resets [TextInjector] alignment
-     * state and, if recording is active, restarts the capture with a fresh audio window.
+     * forward to [KeyboardViewModel.onFieldCleared], which discards pending recording
+     * text and, if recording is active, restarts capture with a fresh audio window.
      */
     override fun onUpdateSelection(
         oldSelStart: Int, oldSelEnd: Int,
@@ -604,11 +617,8 @@ class OutspokeInputMethodService :
     }
 
     override fun onFinishInput() {
+        keyboardViewModel.onInputFinished()
         super.onFinishInput()
-        keyboardViewModel.commitPartialAndStop()
         keyboardViewModel.setTextInjector(null)
     }
 }
-
-
-

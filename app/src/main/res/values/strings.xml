@@ -1,4 +1,19 @@
 <resources>
+    <string name="pref_custom_words_title">Custom words</string>
+    <string name="pref_custom_words_summary">Add names and terms that are often misheard. Similar recognized words will use your saved spelling. Corrections run on this device. Changes apply to the next recording.</string>
+    <string name="pref_custom_words_label">Word or phrase</string>
+    <string name="pref_custom_words_example">For example, Outspoke or MacBook Pro</string>
+    <string name="pref_custom_words_add">Add word</string>
+    <string name="pref_custom_words_remove">Remove</string>
+    <string name="pref_custom_words_remove_label">Remove %1$s</string>
+    <string name="pref_custom_words_empty">No custom words yet.</string>
+    <string name="pref_custom_words_invalid">Use up to 3 words and 50 characters, including at least one letter.</string>
+    <string name="pref_custom_words_duplicate">This word is already saved.</string>
+    <string name="pref_custom_words_limit">You can save up to 100 terms. Remove one to add another.</string>
+    <string name="pref_auto_start_recording_title">Record when Outspoke opens</string>
+    <string name="pref_auto_start_recording_summary">Start listening as soon as the keyboard and speech model are ready. Tap the microphone to stop.</string>
+    <string name="pref_return_keyboard_title">Return to previous keyboard</string>
+    <string name="pref_return_keyboard_summary">When Outspoke closes, finish dictation and switch back to the keyboard you used before it.</string>
     <string name="app_name">Outspoke</string>
     <string name="ime_name">Outspoke Voice Keyboard</string>
     <string name="subtype_en">English (US) - Voice</string>
@@ -58,7 +73,7 @@
     <string name="home_model_ready_subtitle">A transcription model is installed and ready.</string>
     <string name="home_model_not_downloaded_subtitle">Download a transcription model to use the keyboard.</string>
     <string name="home_pref_input">Microphone &amp; Trigger Mode</string>
-    <string name="home_pref_speech">Voice Activity, Post-Processing &amp; Suggestions</string>
+    <string name="home_pref_speech">Speech Processing &amp; Custom Words</string>
     <string name="home_pref_tools">Tutorial &amp; Diagnostics</string>
 
     <!-- Preferences screen -->
@@ -141,7 +156,8 @@
     <string name="notif_engine_failed">Engine failed to load: %s</string>
 
     <!-- Keyboard status messages -->
-    <string name="status_transcribing">Transcribing…</string>
+    <string name="status_transcribing">Finishing…</string>
+    <string name="status_error_insertion">Couldn\'t insert the transcript.</string>
     <string name="status_no_speech">Didn\'t catch that — try again</string>
     <string name="status_engine_model_missing">Model not downloaded - open Outspoke to download</string>
     <string name="status_engine_loading">Loading transcription engine…</string>

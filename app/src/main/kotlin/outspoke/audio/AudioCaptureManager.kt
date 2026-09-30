@@ -8,6 +8,7 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
 import dev.brgr.outspoke.R
+import dev.brgr.outspoke.inference.RecordingTrace
 import dev.brgr.outspoke.settings.preferences.AppPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -93,12 +94,14 @@ class AudioCaptureManager(private val context: Context) {
      */
     @Volatile
     private var activeStop: AtomicBoolean? = null
+    @Volatile private var activeRecordingId = 0L
 
     /**
      * Signals the active [startCapture] flow to exit its read loop and complete normally.
      * The flow will finish within one 40 ms chunk read cycle (~40 ms latency).
      */
     fun stopCapture() {
+        RecordingTrace.log { "capture stop requested session=$activeRecordingId" }
         activeStop?.set(true)
     }
 
@@ -123,10 +126,15 @@ class AudioCaptureManager(private val context: Context) {
      */
     // Permission is checked manually via PermissionHelper before AudioRecord is created.
     @SuppressLint("MissingPermission")
-    fun startCapture(vadEnabled: Boolean = true, rawSource: Boolean = false): Flow<AudioChunk> {
+    fun startCapture(
+        vadEnabled: Boolean = true,
+        rawSource: Boolean = false,
+        recordingId: Long = RecordingTrace.nextSessionId(),
+    ): Flow<AudioChunk> {
         // Allocate before collection so releasing the button during startup is not lost.
         val stopRequested = AtomicBoolean(false)
         activeStop = stopRequested
+        activeRecordingId = recordingId
         return channelFlow {
             if (!PermissionHelper.hasRecordPermission(context)) {
                 throw SecurityException(
@@ -175,15 +183,20 @@ class AudioCaptureManager(private val context: Context) {
             applyPreferredMic(recorder)
 
             val buffer = ShortArray(CHUNK_SAMPLES)
+            var capturedSamples = 0L
+            var forwardedSamples = 0L
+            var nextReport = SAMPLE_RATE * 5L
 
             try {
                 recorder.startRecording()
+                RecordingTrace.log { "capture start session=$recordingId recorder=${recorder.audioSessionId} vad=$vadEnabled raw=$rawSource" }
                 Log.d(TAG, "AudioRecord started - chunk=$CHUNK_SAMPLES samples, buf=$bufferBytes bytes")
 
                 while (currentCoroutineContext().isActive && !stopRequested.get()) {
                     val read = recorder.read(buffer, 0, buffer.size)
                     when {
                         read > 0 -> {
+                            capturedSamples += read
                             val samples = buffer.copyOf(read)
                             val chunk = AudioChunk(samples = samples)
                             val rms = calculateRms(chunk.samples)
@@ -192,6 +205,11 @@ class AudioCaptureManager(private val context: Context) {
                             val toSend = vad?.process(chunk, rms) ?: listOf(chunk)
                             for (c in toSend) {
                                 send(c)
+                                forwardedSamples += c.samples.size
+                            }
+                            if (capturedSamples >= nextReport) {
+                                RecordingTrace.log { "capture progress session=$recordingId samples=$capturedSamples forwarded=$forwardedSamples nonzero=${rms > 0f}" }
+                                nextReport = capturedSamples + SAMPLE_RATE * 5L
                             }
                         }
 
@@ -221,15 +239,17 @@ class AudioCaptureManager(private val context: Context) {
                     do {
                         drained = recorder.read(buffer, 0, buffer.size, AudioRecord.READ_NON_BLOCKING)
                         if (drained > 0) {
+                            capturedSamples += drained
                             val chunk = AudioChunk(samples = buffer.copyOf(drained))
                             val rms = calculateRms(chunk.samples)
                             val toSend = vad?.process(chunk, rms) ?: listOf(chunk)
                             for (c in toSend) {
                                 send(c)
+                                forwardedSamples += c.samples.size
                             }
                         }
                     } while (drained > 0)
-                    Log.d(TAG, "AudioRecord hardware buffer drained")
+                    RecordingTrace.log { "capture hardware drained session=$recordingId samples=$capturedSamples" }
 
                     // Phase 2: if VAD is still in hangover/speech, feed silence frames until
                     // the hangover counter expires and VAD transitions back to SILENCE.
@@ -241,6 +261,7 @@ class AudioCaptureManager(private val context: Context) {
                             val toSend = vad.process(silence, 0f)
                             for (c in toSend) {
                                 send(c)
+                                forwardedSamples += c.samples.size
                             }
                         }
                         Log.d(TAG, "VAD hangover drain complete (framesLeft=$safetyFrames)")
@@ -248,6 +269,7 @@ class AudioCaptureManager(private val context: Context) {
                 }
 
             } finally {
+                RecordingTrace.log { "capture end session=$recordingId samples=$capturedSamples forwarded=$forwardedSamples stop=${stopRequested.get()}" }
                 vad?.flush()
                 vad?.close()
                 recorder.stop()
@@ -305,4 +327,3 @@ class AudioCaptureManager(private val context: Context) {
     }
 
 }
-

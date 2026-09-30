@@ -14,6 +14,9 @@ import java.nio.LongBuffer
 
 private const val TAG = "ParakeetEngine"
 private const val FALLBACK_BLANK_ID = 1024
+/** Two seconds at the encoder's 12.5 frames/s. */
+private const val PREDICTOR_RESET_BLANK_FRAMES = 25
+private const val BLANK_CHUNK_RETRY_CONFIDENCE = 0.55f
 
 /**
  * Output of [ParakeetEngine.greedyDecode]: the decoded text plus a per-token geometric-mean
@@ -52,6 +55,8 @@ data class TdtState(
     val lstmState2: FloatArray,
     val prevToken: Int,
     val frameDelta: Int = 0,
+    /** Encoder frames advanced without a token, carried across streaming chunks. */
+    val blankFrames: Int = 0,
 )
 
 /**
@@ -451,7 +456,34 @@ class ParakeetEngine : SpeechEngine, ChunkStreamingEngine {
         state: TdtState,
     ): ChunkDecodeResult {
         check(isLoaded) { "Engine not loaded; call load() first" }
-        val result = decodeRange(env!!, decSession!!, encoderOut, totalLength, frameStart, frameEnd, state)
+        var result = decodeRange(env!!, decSession!!, encoderOut, totalLength, frameStart, frameEnd, state)
+        // A previous sentence's predictor can suppress every word in a chunk before the
+        // blank-frame timeout resets it. Retry that audio now, while its opening
+        // frames are still available, rather than losing it at the next stride.
+        // A trailing punctuation token alone does not mean speech was recovered.
+        if (detokenize(result.tokens).none { it.isLetterOrDigit() } && state.prevToken != blankId) {
+            val retry = decodeRange(
+                env!!, decSession!!, encoderOut, totalLength, frameStart, frameEnd, initialTdtState(),
+            )
+            if (retry.confidence >= BLANK_CHUNK_RETRY_CONFIDENCE &&
+                detokenize(retry.tokens).any { it.isLetterOrDigit() }
+            ) {
+                RecordingTrace.log { "blank chunk recovered tokens=${retry.tokens.size} confidence=${retry.confidence}" }
+                // The original predictor may finish the previous sentence before it
+                // stalls. Preserve that endpoint when it precedes recovered speech.
+                val keepEndpoint = detokenize(result.tokens).trim() in setOf(".", "!", "?") &&
+                    result.emissions.isNotEmpty() && retry.emissions.isNotEmpty() &&
+                    result.emissions.last().frame < retry.emissions.first().frame &&
+                    detokenize(retry.tokens).trimStart().firstOrNull()?.isLetterOrDigit() == true
+                result = if (keepEndpoint) retry.copy(
+                    tokens = result.tokens + retry.tokens,
+                    logProbSum = result.logProbSum + retry.logProbSum,
+                    emissionCount = result.emissionCount + retry.emissionCount,
+                    emissions = result.emissions + retry.emissions,
+                    stateSnapshots = result.stateSnapshots + retry.stateSnapshots,
+                ) else retry
+            }
+        }
         return ChunkDecodeResult(
             result.tokens, result.state, result.logProbSum, result.emissionCount,
             result.emissions, result.stateSnapshots,
@@ -801,6 +833,7 @@ class ParakeetEngine : SpeechEngine, ChunkStreamingEngine {
         // [initialTdtState]), which the joint's predictor embedding accepts as its first input.
         // Subsequent steps feed the last emitted (non-blank) token.
         var prevToken = state.prevToken
+        var blankFrames = state.blankFrames
         var t = frameStart
         var maxIter = (frameEnd - frameStart) * 20 + 50   // per-range safety cap
         var tokensAtFrame = 0             // per-frame guard against duration=0 loops
@@ -808,6 +841,16 @@ class ParakeetEngine : SpeechEngine, ChunkStreamingEngine {
         val maxHypothesis = 2000     // ~20-30 s of speech at typical token rate
 
         while (t < frameEnd && maxIter-- > 0 && hypothesis.size < maxHypothesis) {
+            // After two seconds without a token, start a new predictor context.
+            // Keeping the previous sentence's LSTM state through a long pause can
+            // suppress every token of the next sentence. Preserve the frame position
+            // and accumulated transcript; only the predictor state is reset.
+            if (blankFrames >= PREDICTOR_RESET_BLANK_FRAMES && prevToken != blankId) {
+                lstmState1 = FloatArray(2 * 640)
+                lstmState2 = FloatArray(2 * 640)
+                prevToken = blankId
+                RecordingTrace.log { "decoder reset after blank frames=$blankFrames" }
+            }
             // References to the pre-call decoder state (zero-copy: the LSTM update below
             // allocates fresh arrays, so these keep pointing at the pre-call state).
             // Kept so an emitting call can record a [FrameState] snapshot for the local
@@ -918,9 +961,12 @@ class ParakeetEngine : SpeechEngine, ChunkStreamingEngine {
 
                     // TDT advance rule
                     if (predictedToken == blankId) {
-                        t += maxOf(1, predictedDur)
+                        val advance = maxOf(1, predictedDur)
+                        t += advance
+                        blankFrames = (blankFrames + advance).coerceAtMost(PREDICTOR_RESET_BLANK_FRAMES)
                         tokensAtFrame = 0
                     } else {
+                        blankFrames = 0
                         hypothesis.add(predictedToken)
                         prevToken = predictedToken
                         tokensAtFrame++
@@ -961,7 +1007,7 @@ class ParakeetEngine : SpeechEngine, ChunkStreamingEngine {
         }
         return DecodeRangeResult(
             hypothesis,
-            TdtState(lstmState1, lstmState2, prevToken, frameDelta),
+            TdtState(lstmState1, lstmState2, prevToken, frameDelta, blankFrames),
             confidence,
             logProbSum,
             nonBlankEmissions,
@@ -970,52 +1016,8 @@ class ParakeetEngine : SpeechEngine, ChunkStreamingEngine {
         )
     }
 
-    /**
-     * Converts token IDs to a string using [vocabulary].
-     * Handles SentencePiece word-boundary markers (U+2581 `▁`).
-     *
-     * NeMo SentencePiece exports fill unused vocabulary slots with their own index as
-     * the token string (e.g. `"7883"`, `"▁1980ess"`, `"▁7880over"`). We handle these
-     * by stripping any leading digit run from the bare token and using only the
-     * alphabetic/punctuation suffix:
-     *   - `"7865"`    → effective = ""     → skip entirely
-     *   - `"▁3402a"`  → effective = "a"    → emit with word-boundary space
-     *   - `"▁7880over"` → effective = "over" → emit with word-boundary space
-     *   - `"1980ess"` → effective = "ess"  → append directly (no space; continues prev word)
-     *
-     * A post-processing pass collapses any double-spaces that arise from removed
-     * digit-only tokens and moves spaces that ended up before punctuation.
-     */
-    private fun detokenize(tokenIds: List<Int>): String {
-        if (tokenIds.isEmpty()) return ""
-        val raw = buildString {
-            for (id in tokenIds) {
-                if (id < 0 || id >= vocabulary.size || id == blankId) continue
-                val token = vocabulary[id]
-                // Remove the SentencePiece word-boundary marker before processing.
-                val bare = token.removePrefix("▁")
-                // Strip any leading digit run - NeMo fills unused slots with their index
-                // (e.g. "▁1980ess" → bare = "1980ess" → effective = "ess").
-                // If nothing meaningful remains after stripping, skip the token entirely.
-                val effective = bare.dropWhile { it.isDigit() }
-                if (effective.isBlank()) continue
-                when {
-                    token.startsWith("▁") -> {
-                        if (isNotEmpty()) append(' ')
-                        append(effective)
-                    }
-
-                    else -> append(effective)
-                }
-            }
-        }
-        // Post-process: remove spaces that ended up before punctuation (artifact of
-        // digit-only tokens being dropped mid-sequence) and collapse any double-spaces.
-        return raw
-            .replace(Regex(" ([.,!?;:])"), "$1")
-            .replace(Regex(" {2,}"), " ")
-            .trim()
-    }
+    private fun detokenize(tokenIds: List<Int>): String =
+        decodeParakeetTokens(tokenIds, vocabulary, blankId)
 
     /**
      * Copies [source]'s float data into a new [OnnxTensor] so that the parent

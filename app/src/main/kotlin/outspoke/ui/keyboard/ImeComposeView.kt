@@ -122,7 +122,7 @@ private fun ImeProcessingPreview() {
 @Preview(showBackground = true, backgroundColor = 0xFF111111, name = "IME · Transcribing")
 @Composable
 private fun ImeTranscribingPreview() {
-    ImePreviewScaffold(uiState = KeyboardUiState.Transcribing)
+    ImePreviewScaffold(uiState = KeyboardUiState.Transcribing("Hello world…"))
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFF111111, name = "IME · Whisper + Language Bar")
@@ -146,4 +146,3 @@ private fun ImeEngineLoadingPreview() {
 private fun ImeErrorPreview() {
     ImePreviewScaffold(uiState = KeyboardUiState.Error(KeyboardUiState.ErrorReason.MicPermissionDenied))
 }
-

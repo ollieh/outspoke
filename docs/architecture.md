@@ -61,13 +61,13 @@ Single Gradle module (app). All Kotlin source lives under app/src/main/kotlin/ (
 | Package | Key files | Responsibility |
 |---|---|---|
 | audio | AudioCaptureManager, MicCalibrationManager, SileroVadFilter, RMSVadFilter, VadFilter, AudioChunk, PermissionHelper | Mic capture, PCM chunking, Voice Activity Detection, optional mic calibration |
-| inference | SpeechEngine, ParakeetEngine, ChunkStreamingEngine, WhisperEngine, VoxtralEngine, SpeechEngineFactory, InferenceRepository, InferenceService, TranscriptResult, EngineState, PipelineDiagnostics, NumberNormaliser, GrammarCorrector, AcousticCandidates | ASR pipeline, sliding window, post-processing, foreground service, acoustic word-alternative capture |
-| ime | OutspokeInputMethodService, TextInjector, TranscriptAligner, EnterAction, WordSuggestionProvider | Keyboard service, composing text management, alignment, word-correction facade |
+| inference | SpeechEngine, ParakeetEngine, ChunkStreamingEngine, ParakeetUnifiedEngine, StreamingSpeechEngine, NemoLogMel, WhisperEngine, VoxtralEngine, SpeechEngineFactory, InferenceRepository, InferenceService, TranscriptResult, EngineState, PipelineDiagnostics, NumberNormaliser, GrammarCorrector, AcousticCandidates | ASR pipeline, sliding window, post-processing, foreground service, acoustic word-alternative capture |
+| ime | OutspokeInputMethodService, TextInjector, TranscriptAligner, EnterAction, WordSuggestionProvider | Keyboard service, recording insertion, legacy alignment, word-correction facade |
 | ime/correction | WordCorrector, CandidateGenerator, ArpaLanguageModel, SuggestionFileDownloader, SuggestionFileManager, SuggestionLanguage, DoubleMetaphone, KolnerPhonetik, EditDistance | On-device word correction + downloadable language pack management |
 | settings/model | ModelId, ModelRegistry, ModelDownloadManager, ModelStorageManager, ModelState, ModelViewModel, DownloadService | Model enumeration, download, SHA-256 verification, on-disk paths |
 | settings/preferences | AppPreferences, PreferencesViewModel | DataStore-backed user preferences |
 | settings/screens | HomeScreen, ModelScreen, PreferencesScreen, MicCalibrationScreen | Settings Compose UI |
-| ui/keyboard | KeyboardViewModel, KeyboardUiState, KeyboardScreen, ImeComposeView, WordAtCursor | IME Compose hosting, UI state |
+| ui/keyboard | KeyboardViewModel, KeyboardUiState, RecordingTranscript, KeyboardScreen, ImeComposeView, WordAtCursor | IME Compose hosting, UI state |
 | ui/keyboard/components | TalkButton, SuggestionBar, WaveformBar, StatusIndicator, KeyboardActionButton, KeyboardTutorialOverlay, LanguageSelector | Keyboard UI sub-components |
 | ui/theme | OutspokeKeyboardTheme | Compose theming |
 
@@ -128,6 +128,38 @@ Single Gradle module (app). All Kotlin source lives under app/src/main/kotlin/ (
 
 **SpeechEngineFactory** routes ModelId to a concrete engine implementation.
 
+Parakeet carries predictor state across streaming chunks. After 25 encoder frames
+(two seconds) without a token, it resets the predictor's LSTM state and previous
+token. The blank-frame count travels in `TdtState` so pauses spanning chunk
+boundaries also reset it. This prevents the previous sentence's state from
+suppressing speech after a pause, including when VAD is disabled. Accumulated
+tokens and the decoder's frame position are preserved.
+
+If a chunk emits no letters or digits with a carried predictor, Parakeet also retries that
+same frame range once with fresh predictor state, reusing the encoder output.
+The retry replaces the blank result only when it contains a letter or digit and
+its geometric-mean token confidence is at least 0.55. This recovers speech that
+would otherwise be skipped before the blank-frame reset takes effect.
+Punctuation-only chunks qualify for recovery: a trailing period can be emitted
+while all the following speech is suppressed.
+Detokenisation preserves literal digits and standalone SentencePiece word
+boundaries from the vocabulary.
+
+Each two-second chunk is encoded with two seconds of preceding audio and four
+seconds of lookahead. The first live partial can therefore appear after six
+seconds plus inference time; stopping flushes the remaining audio without waiting
+for more lookahead.
+
+If a chunk still contains no words, the repository re-encodes up to four seconds
+of preceding audio and decodes that overlap through the current chunk with fresh
+predictor state. `findStreamingRecoveryStart` anchors the result to a suffix of
+the existing transcript, checking at most 48 previous tokens and requiring at
+least two matching tokens containing a word. Only the new continuation is
+appended, with a confidence gate of 0.55 calculated over its tokens alone.
+Unmatched, punctuation-only and already-emitted results are discarded. The
+normal encoder window is at most eight seconds; recovery uses at most ten.
+This recovers speech whose onset fell in an earlier chunk that suppressed it.
+
 **InferenceRepository**
 
 Number formatting validates phrase boundaries before combining number words, preserving countdowns and punctuation-separated lists. Stutter and phrase cleanup retain repeated numeric tokens, including number words, so dictated codes are not shortened.
@@ -159,14 +191,14 @@ Number formatting validates phrase boundaries before combining number words, pre
 - Binds to InferenceService for the IME lifetime and starts it when shown so it can survive IME recreation.
 - Applies FLAG_KEEP_SCREEN_ON while capture is active and clears it when capture stops.
 - Forwards InputConnection changes to TextInjector and KeyboardViewModel.
+- Input preferences `auto_start_recording` and `return_to_previous_keyboard` are booleans, both false by default. Auto recording waits for the model to be ready and starts once per keyboard opening, with tap-to-stop enabled even in Hold mode. Hiding cancels a pending start and stops capture. Returning to the previous keyboard waits for the final transcript, is cancelled on reopening, and checks that Outspoke is still the selected IME.
 
 **TextInjector**
 
 - Manages all writes to the active InputConnection.
-- Keeps the last 6 words (MUTABLE_WORD_COUNT = 6) as a composing (underlined) span via setComposingText; all earlier words are permanently committed.
-- On WindowTrimmed: commits composing text minus the last TRIM_TAIL_WORD_COUNT uncertain tail words, clears lastPartial, re-anchors committedWords from actual field content.
-- Two-layer alignment recovery (field-scan -> composing-commit fallback) handles complete divergence.
-- Delegates new-content discovery to TranscriptAligner.
+- `insertTranscript` writes a completed recording in one `commitText` call, including separators and the optional trailing space.
+- Recording previews and audio-window overlap live in `RecordingTranscript`, with no editor writes while recording or finishing.
+- Older composing-span methods remain for legacy callers and alignment tests, delegating overlap discovery to TranscriptAligner.
 
 **TranscriptAligner** (pure / stateless)
 
@@ -200,6 +232,10 @@ Number formatting validates phrase boundaries before combining number words, pre
 
 ### 3.5 UI Layer
 
+**Custom vocabulary:** `custom_words` is a DataStore string set, empty by default. Speech preferences support adding and removing up to 100 terms, each at most 50 characters and three words. `CustomWordCorrector` normalizes duplicate entries while preserving the saved spelling. The repository snapshots the vocabulary when a recording begins and corrects full partial/final transcripts before editor alignment. The streaming display path passes these results through unchanged, avoiding a second cleaner that could alter saved casing or number-containing terms.
+
+Matching considers up to three recognized words without crossing punctuation or newlines. It uses normalized edit distance below 0.18, with a phonetic bonus only for ASCII words within two edits. Short words and numeric strings require exact normalized matches; equally good alternatives stay unchanged. This is text correction, not acoustic decoder biasing, and cannot restore words the model omitted. It requires no download and works independently of the suggestion bar.
+
 **KeyboardViewModel** bridges IME lifecycle, AudioCaptureManager, and InferenceRepository results into KeyboardUiState. Owns captureJob - the coroutine driving audio capture for a recording session.
 
 **KeyboardUiState** (sealed class):
@@ -209,7 +245,7 @@ Number formatting validates phrase boundaries before combining number words, pre
 | Idle | Keyboard visible, not recording |
 | Listening | Mic open, VAD active |
 | Processing(partial) | Partial transcript available |
-| Transcribing | Final inference running |
+| Transcribing(partial) | Final inference running; recording preview remains visible |
 | EngineLoading(reason) | Engine is being loaded |
 | Error(reason, detail) | Unrecoverable error |
 
@@ -243,11 +279,11 @@ Number formatting validates phrase boundaries before combining number words, pre
 
 ### TranscriptResult (sealed class)
 
-| Variant | Fields | TextInjector action |
+| Variant | Fields | Recording action |
 |---|---|---|
-| Partial(text) | text: String | setComposingText - keep last 6 words mutable |
-| Final(text, isUtteranceBoundary) | isUtteranceBoundary: Boolean | commitText; when isUtteranceBoundary=true do NOT stop capture |
-| WindowTrimmed(stableWords) | stableWords: List<String> | Call resetAfterTrim(stableWords) immediately - skipping causes silent word drops |
+| Partial(text) | text: String | Replace the active utterance in the keyboard preview |
+| Final(text, isUtteranceBoundary) | isUtteranceBoundary: Boolean | Accumulate a finalized utterance; boundary finals continue capture; insert the recording once after successful flow completion |
+| WindowTrimmed(stableWords) | stableWords: List<String> | Reconcile the retained audio-window overlap in recording memory |
 | Failure(exception) | exception: Throwable | Log; surface to user via KeyboardUiState.Error |
 
 ### EngineState (sealed class)
@@ -267,7 +303,8 @@ summary() returns e.g. "2T . 1R . 3B" or "OK" when all zero.
 
 ## 6. Sliding-Window Inference Details
 
-Key constants in InferenceRepository:
+This section describes the fallback path for engines without `ChunkStreamingEngine` or `StreamingSpeechEngine`.
+Parakeet uses the chunked path described above. Key constants in InferenceRepository:
 
 | Constant | Value | Purpose |
 |---|---|---|
@@ -316,26 +353,13 @@ Applied to every raw transcript string before wrapping in a TranscriptResult:
 
 ## 8. Text Injection and Alignment
 
-### Composing span management (TextInjector)
+### Recording preview and insertion
 
-    [... permanently committed words ...] [last 6 words -- composing span (underlined)]
-                                           ^
-                                           MUTABLE_WORD_COUNT boundary
+`KeyboardViewModel` owns one `RecordingTranscript` per capture job. Partials replace the active utterance in the keyboard preview; finals accumulate completed utterances without writing to the editor. A silence boundary resets the active utterance and continues capture. Legacy `WindowTrimmed` events preserve the dropped prefix in memory and reconcile later hypotheses through overlap matching.
 
-- Every Partial: TranscriptAligner.findNewContent identifies genuinely new tokens; setComposingText updates the composing span.
-- Every Final: finishComposingText + commitText flushes the composing span.
-- Every WindowTrimmed: resetAfterTrim(stableWords) must be called immediately.
-  - Commits all composing text except the last TRIM_TAIL_WORD_COUNT uncertain tail words.
-  - Clears lastPartial.
-  - Re-reads committedWords from the actual field content to re-anchor alignment.
+Successful flow completion inserts finalized utterances once through `TextInjector.insertTranscript`. A single `commitText` includes the recording, a preceding separator when needed, and the optional trailing space. Selected text is replaced directly. Suggestions refresh after insertion; automatic keyboard return waits for completion.
 
-### Three-layer overlap search (TranscriptAligner.findNewContent)
-
-1. Full prefix match: check if partial starts with all committed words -> fast path, emit only the suffix.
-2. Suffix-prefix overlap >=2 words: find the longest suffix of committed words that is a prefix of the new partial.
-3. Interior scan >=2 words: slide a window across the partial looking for a matching subsequence.
-
-If all three layers fail, the entire partial is returned as new content (alignment recovery, counted in PipelineDiagnostics.alignmentRecoveries).
+`Transcribing(partial)` preserves the preview after Stop. Errors retain the preview and leave the editor unchanged; a rejected editor insertion has its own error reason. A new input session, finishing input, or clearing a field cancels pending insertion. Clearing during active dictation starts a fresh recording. The older composing-span methods remain for legacy callers and alignment tests; the recording UI no longer freezes words or updates composing text.
 
 ---
 
@@ -373,6 +397,36 @@ If all three layers fail, the entire partial is returned as new content (alignme
 ---
 
 ## 10. Engine Implementations
+
+### ParakeetUnifiedEngine (experimental debug option)
+
+English-only Parakeet Unified EN 0.6B uses the pinned sherpa-onnx INT8 streaming
+export, about 663 MB across encoder, predictor, joiner and tokens. Every downloaded
+file has a SHA-256 digest. The existing multilingual V3 remains the default.
+Unified appears in debug builds pending Android device validation.
+
+`StreamingSpeechEngine.newStream()` creates an utterance session. The session owns
+the trained attention window and RNN-T state; `InferenceRepository` feeds PCM,
+cleans accumulated hypotheses, and closes the session after Stop, a silence
+boundary, failure or cancellation. Silence boundaries start fresh decoder state
+for the next utterance without stopping the recording. Custom words and text
+insertion use the recording preview and completion path. Suggestions fall back to the dictionary because
+this engine does not collect acoustic alternatives.
+
+`NemoLogMel` extracts unnormalized 128-bin Slaney log-mel frames from 16 kHz PCM.
+The engine assembles 560 left-context, 56 center and 56 right-context frames,
+pads missing feature frames with zero, then normalizes each feature over the whole
+window. It decodes only the center frames and carries predictor state across
+windows. Stop flushes the remaining center frames with right padding. The
+1.12-second profile describes audio context, not a measured phone response time.
+Sessions use `ALL_OPT` and up to four intra-op CPU threads. `ParakeetUnifiedEngine(intraOpThreads = N)` supports explicit 1–8 thread counts for benchmarks. `just benchmark-unified` runs the opt-in instrumented comparison on an arm64 device with Unified downloaded. Test audio lives only in the test APK.
+
+Debug `OutspokeTrace` records monotonic timestamps, recording/utterance IDs, queued audio duration and age, encoder/window times, finalization duration, and editor insertion duration/acceptance. It excludes transcript and audio content. Use these to distinguish microphone shutdown, queued work and the final tail; thread tuning still needs real-device and sustained thermal measurements.
+
+See [model research](parakeet-streaming-models.md) before changing export,
+preprocessing, window dimensions or decoder behavior. Real-model tests opt in via
+`-Ptest.unified.model.dir=/path/to/export`; private counting audio is supplied with
+`-Ptest.counting.wav=/path/to/recording.wav` and stays outside the repository.
 
 ### ParakeetEngine (active)
 
@@ -644,7 +698,10 @@ testOptions { unitTests.isReturnDefaultValues = true }.
 | audio/MicScorerTest | Mic quality scoring (HF fraction, percentile SNR) |
 | audio/RMSVadFilterTest | Energy VAD onset/hangover logic |
 | ime/TranscriptAlignerTest | All 3 layers of findNewContent |
-| ime/TextInjectorTest | Composing span management, trim resets |
+| ime/TextInjectorTest | Legacy composing span management, trim resets |
+| ime/TextInjectorRecordingTest | Single insertion with separators and selected-text replacement |
+| ui/keyboard/RecordingTranscriptTest | Revisable utterances, silence boundaries and legacy trims |
+| ui/keyboard/KeyboardViewModelRecordingTest | Preview-only recording, final insertion, failures and input-session cancellation |
 | ime/ReplaceCursorWordTest | TextInjector.replaceCursorWord: replace at cursor, insert between words |
 | ime/WordAtCursorTest | TextInjector.wordAtCursor: left-fragment extraction, sentence context |
 | ime/WordSuggestionProviderTest | Acoustic-first facade: lookup, context extraction, main-thread delivery |
@@ -701,7 +758,7 @@ No changes required in InferenceRepository, InferenceService, TextInjector, or a
 | Model storage | <filesDir>/models/<storageDirName>/ - no external storage permission |
 | SHA-256 verification | Required for all downloaded model files; add hashes to RemoteFile entries |
 | storageDirName immutability | Changing it breaks existing installations |
-| WindowTrimmed handling | TextInjector.resetAfterTrim(stableWords) must be called immediately on every WindowTrimmed event - skipping causes silent word drops on every stride after a window trim |
+| WindowTrimmed handling | RecordingTranscript preserves the dropped prefix in memory and reconciles the retained overlap; no editor write |
 | Final(isUtteranceBoundary=true) | Do NOT stop audio capture - used for mid-session sentence boundaries in long dictation |
 | InferenceService stop | Unbinding does not stop the service; shuts down only when explicitly stopped or after the 30 s keyboard-hidden timer |
 | Kotlin code style | kotlin.code.style=official |

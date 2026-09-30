@@ -3,10 +3,11 @@ package dev.brgr.outspoke.inference
 import ai.onnxruntime.OnnxTensor
 import android.util.Log
 import dev.brgr.outspoke.audio.AudioChunk
+import dev.brgr.outspoke.BuildConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.Flow
@@ -14,6 +15,9 @@ import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.takeWhile
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onCompletion
+import java.util.concurrent.atomic.AtomicLong
 import java.util.Locale
 import kotlin.collections.ArrayDeque
 import kotlin.collections.List
@@ -834,17 +838,20 @@ private const val MAX_WINDOW_SAMPLES = SAMPLE_RATE * 30   // 30 s = 480 000 samp
 // encoder is run on a [LEFT_CONTEXT | chunk | RIGHT_CONTEXT] buffer (the Conformer is
 // bidirectional, so the right context improves the chunk's encoder features), and only the
 // chunk's frames are decoded, carrying the TDT decoder state from the previous chunk. This
-// yields offline-equivalent accuracy with no re-emission or duplication. Measured by
-// StreamingParityTest (18 real fixtures): the frozen field text is byte-identical to the
-// one-shot final (WER 0.0), and the residual delta vs the one-shot reference is the model's
-// 2 s-context approximation (worst fixture 1 word / 34 ≈ 0.03). Latency to the first
-// committed chunk is CHUNK + RIGHT (≈ 4 s); each subsequent chunk commits RIGHT after it ends.
+// bounds inference cost without re-emitting previous chunks. This is an approximation
+// of full-utterance inference: too little context can make the encoder suppress speech
+// that becomes recognisable only after those frames have been passed. Human-speech
+// regression recordings require four seconds of lookahead. The first chunk is ready
+// after CHUNK + RIGHT (6 s); subsequent chunks are ready RIGHT after they end.
 
 /** Size of each processed chunk (2 s). */
 private const val CHUNK_SAMPLES = SAMPLE_RATE * 2            // 2 s = 32 000 samples
 
-/** Lookahead (right context) required before a chunk is decoded (2 s). */
-private const val RIGHT_CONTEXT_SAMPLES = SAMPLE_RATE * 2    // 2 s = 32 000 samples
+/** Lookahead (right context) required before a chunk is decoded (4 s). */
+private const val RIGHT_CONTEXT_SAMPLES = SAMPLE_RATE * 4    // 4 s = 64 000 samples
+/** Retain enough preceding audio to re-decode a sentence whose onset was suppressed. */
+private const val RETRY_LEFT_CONTEXT_SAMPLES = SAMPLE_RATE * 4
+private const val CONTEXT_RECOVERY_CONFIDENCE = 0.55
 
 /** Trailing (left) context kept before each chunk for encoder anchoring (2 s). */
 private const val LEFT_CONTEXT_SAMPLES = SAMPLE_RATE * 2     // 2 s = 32 000 samples
@@ -1277,6 +1284,8 @@ class InferenceRepository(
     private val grammarCorrector: GrammarCorrector = NoOpGrammarCorrector,
 ) {
 
+    val producesCleanTranscripts: Boolean get() = engine is ChunkStreamingEngine || engine is StreamingSpeechEngine
+
     /**
      * Bounded cache of per-word acoustic alternatives, populated at decode time by the
      * Parakeet streaming path (top-K token swaps + bounded local beam over low-confidence
@@ -1367,10 +1376,23 @@ class InferenceRepository(
         audio: Flow<AudioChunk>,
         postprocessingEnabled: Boolean = true,
         formatNumbersAsDigits: Boolean = true,
+        customWords: List<String> = emptyList(),
+        recordingId: Long = RecordingTrace.nextSessionId(),
     ): Flow<TranscriptResult> = flow {
         sessionMutex.withLock {
             check(!closed) { "Speech model is no longer available. Open the keyboard again to reload it." }
-            emitAll(transcribeSession(audio, postprocessingEnabled, formatNumbersAsDigits))
+            val corrector = CustomWordCorrector(customWords)
+            transcribeSession(audio, postprocessingEnabled, formatNumbersAsDigits, recordingId).collect { result ->
+                emit(when (result) {
+                    is TranscriptResult.Partial -> result.copy(text = corrector.correct(result.text))
+                    is TranscriptResult.Final -> result.copy(text = corrector.correct(result.text))
+                    is TranscriptResult.WindowTrimmed -> result.copy(
+                        stableWords = corrector.correct(result.stableWords.joinToString(" "))
+                            .split(' ').filter { it.isNotEmpty() },
+                    )
+                    else -> result
+                })
+            }
         }
     }
 
@@ -1378,7 +1400,12 @@ class InferenceRepository(
         audio: Flow<AudioChunk>,
         postprocessingEnabled: Boolean = true,
         formatNumbersAsDigits: Boolean = true,
+        recordingId: Long,
     ): Flow<TranscriptResult> = channelFlow<TranscriptResult> {
+        if (engine is StreamingSpeechEngine) {
+            modelStreamingTranscribe(engine, audio, postprocessingEnabled, formatNumbersAsDigits, recordingId).collect { send(it) }
+            return@channelFlow
+        }
         // The chunked-TDT streaming path requires the [ChunkStreamingEngine] stateful
         // decode primitives (implemented by ParakeetEngine). If a non-streaming engine is
         // configured we fall back to the legacy whole-window re-transcription path (kept
@@ -1398,17 +1425,17 @@ class InferenceRepository(
         // The audio buffer (growing list of PCM chunks) plus the TDT decoder state. Audio is
         // processed in fixed [CHUNK_SAMPLES] strides with [RIGHT_CONTEXT_SAMPLES] of lookahead
         // and [LEFT_CONTEXT_SAMPLES] of trailing context. The TDT decoder state is carried
-        // across chunks so each chunk emits exactly its own new tokens — no re-emission, no
-        // duplication, and offline-equivalent accuracy (see StreamingParityTest for the
-        // measured field-vs-one-shot delta).
+        // across successful chunks. Wordless chunks can re-decode the preceding audio
+        // and append a continuation anchored to the existing transcript.
         val buffer = ArrayDeque<ShortArray>()
         var totalSamples = 0
         // Absolute sample position of buffer.first() (0 until the front is trimmed). The
         // buffer is bounded: once a chunk is decoded, audio older than the next chunk's
-        // left-context start is never read again and is trimmed from the front so a long
+        // recovery-context start is never read again and is trimmed from the front so a long
         // dictation does not grow the buffer without bound (30 min ≈ 57 MB unbounded).
         var bufferStart = 0
-        var state = streaming.initialTdtState()
+        val initialStreamingState = streaming.initialTdtState()
+        var state = initialStreamingState
         val allTokens = mutableListOf<Int>()
         var nextChunkStart = 0
         // Per-utterance confidence accumulators: the sum of per-emission log-softmax
@@ -1644,45 +1671,71 @@ class InferenceRepository(
         // appending its tokens to [allTokens] and updating [state].
         fun decodeChunkRange(chunkStart: Int, chunkEnd: Int, rightEnd: Int) {
             if (streamFailure != null) return
-            val bufStart = maxOf(0, chunkStart - LEFT_CONTEXT_SAMPLES)
+            val traceStart = System.nanoTime()
             val bufEnd = minOf(rightEnd, totalSamples)
-            if (bufEnd <= bufStart) return
-            val (encOut, encLen) = try {
-                streaming.encodeBuffer(extractRange(bufStart, bufEnd))
-            } catch (ex: Exception) {
-                recordStreamFailure(ex, chunkStart, chunkEnd)
-                return
+            fun attempt(leftContext: Int, recoverPrefix: Boolean = false): Triple<OnnxTensor, Int, ChunkDecodeResult> {
+                val bufStart = maxOf(0, chunkStart - leftContext)
+                val (encOut, encLen) = streaming.encodeBuffer(extractRange(bufStart, bufEnd))
+                try {
+                    // Normal decoding resumes after the previous duration jump. Recovery
+                    // starts from the overlap's beginning so it can restore a lost onset.
+                    val frameStart = if (recoverPrefix) 0 else
+                        (frameOffset(chunkStart - bufStart) + state.frameDelta).coerceIn(0, encLen)
+                    // At the end of the buffer use the encoder's actual frame count;
+                    // the sample-position mapping otherwise omits the final frame.
+                    val frameEnd = if (chunkEnd >= bufEnd) encLen else minOf(frameOffset(chunkEnd - bufStart), encLen)
+                    val decoded = streaming.decodeChunk(
+                        encOut, encLen, frameStart, if (frameEnd <= frameStart) encLen else frameEnd,
+                        if (recoverPrefix) initialStreamingState else state,
+                    )
+                    return Triple(encOut, encLen, decoded)
+                } catch (ex: Exception) {
+                    encOut.close()
+                    throw ex
+                }
             }
+            var chosen: Triple<OnnxTensor, Int, ChunkDecodeResult>? = null
             try {
-                // The nominal chunk start, shifted by the previous chunk's frameDelta: a
-                // positive delta means the TDT duration jump at the previous boundary
-                // skipped frames past the nominal start (the one-shot decoder never
-                // visits them — decoding them here would emit phantom tokens); a negative
-                // delta resumes a few frames early after a safety-cap termination.
-                val fL = (frameOffset(chunkStart - bufStart) + state.frameDelta).coerceIn(0, encLen)
-                // Frame end: when the chunk extends to the end of the encoded buffer (no
-                // right context beyond it — the short-utterance flush's final chunk), the
-                // end must be the true encoder frame count [encLen]. [frameOffset] is a
-                // position→frame map, not a total count: it underestimates the frame count
-                // for a buffer of length n by 1 for most n (floor vs the encoder's ceiling
-                // subsample), so using it here would drop the last encoder frame — the tail
-                // of the word. For interior chunks (streaming, with right context) the
-                // position map correctly selects the chunk's end frame within the buffer.
-                val chunkReachesBufferEnd = (chunkEnd - bufStart) >= (bufEnd - bufStart)
-                val fLC = if (chunkReachesBufferEnd) encLen else minOf(frameOffset(chunkEnd - bufStart), encLen)
-                val decoded = streaming.decodeChunk(
-                    encOut, encLen, fL, if (fLC <= fL) encLen else fLC, state
-                )
+                RecordingTrace.log { "encode begin chunk=$chunkStart..$chunkEnd buffered=$totalSamples" }
+                chosen = attempt(LEFT_CONTEXT_SAMPLES)
+                // A missing onset may already lie in the previous chunk. Re-decode
+                // the retained overlap, then discard the matched transcript prefix.
+                // Only accept confident NEW speech; old words must not inflate its score.
+                if (chunkStart > 0 &&
+                    streaming.detokenizeTokens(chosen.third.tokens).none { it.isLetterOrDigit() }
+                ) {
+                    val retry = attempt(RETRY_LEFT_CONTEXT_SAMPLES, recoverPrefix = true)
+                    val continuationStart = findStreamingRecoveryStart(allTokens, retry.third.tokens) { tokens ->
+                        streaming.detokenizeTokens(tokens).any { it.isLetterOrDigit() }
+                    }
+                    val tokens = continuationStart?.let { retry.third.tokens.drop(it) }.orEmpty()
+                    val emissions = continuationStart?.let { retry.third.emissions.drop(it) }.orEmpty()
+                    val logProbSum = emissions.sumOf { it.logProb }
+                    val confidence = Math.exp(logProbSum / maxOf(1, emissions.size))
+                    if (continuationStart != null && confidence >= CONTEXT_RECOVERY_CONFIDENCE &&
+                        streaming.detokenizeTokens(tokens).any { it.isLetterOrDigit() }
+                    ) {
+                        chosen.first.close()
+                        chosen = Triple(retry.first, retry.second, retry.third.copy(
+                            tokens = tokens, emissions = emissions, emissionCount = emissions.size,
+                            logProbSum = logProbSum, stateSnapshots = retry.third.stateSnapshots.drop(continuationStart),
+                        ))
+                        RecordingTrace.log { "encoder context recovered chunk=$chunkStart tokens=${tokens.size} confidence=$confidence" }
+                    } else {
+                        retry.first.close()
+                    }
+                }
+                val (encOut, encLen, decoded) = chosen
                 state = decoded.state
                 allTokens += decoded.tokens
                 totalLogProbSum += decoded.logProbSum
                 totalEmissions += decoded.emissionCount
-                // Capture acoustic word alternatives while the encoder tensor is open.
                 captureAcousticCandidates(decoded, encOut, encLen)
+                RecordingTrace.log { "decode end chunk=$chunkStart tokens=${decoded.tokens.size} totalTokens=${allTokens.size} ms=${(System.nanoTime() - traceStart) / 1_000_000}" }
             } catch (ex: Exception) {
                 recordStreamFailure(ex, chunkStart, chunkEnd)
             } finally {
-                encOut.close()
+                chosen?.first?.close()
             }
         }
 
@@ -1712,6 +1765,7 @@ class InferenceRepository(
                     formatNumbersAsDigits = formatNumbersAsDigits,
                 )
             else raw
+            RecordingTrace.log { "partial text rawChars=${raw.length} cleanedChars=${cleaned.length} tokens=${allTokens.size}" }
             if (cleaned.isBlank()) return
             val confidence = utteranceConfidence()
             val toSend = if (isScriptHallucination(cleaned, engine.currentLanguage)) {
@@ -1724,7 +1778,7 @@ class InferenceRepository(
 
         // Decode every chunk whose full right context is now available, emitting a Partial each.
         // Stops immediately if a streaming failure was recorded. After decoding, trims the
-        // buffer front to the next chunk's left-context start (audio older than that is never
+        // buffer front to the next chunk's recovery-context start (older audio is never
         // read again) so the buffer stays bounded during long dictations.
         suspend fun decodeReadyChunks() {
             while (streamFailure == null && nextChunkStart + CHUNK_SAMPLES + RIGHT_CONTEXT_SAMPLES <= totalSamples) {
@@ -1734,8 +1788,7 @@ class InferenceRepository(
                 if (streamFailure != null) break
                 emitPartial()
             }
-            // Keep only what the next chunk's left context (or a flush) can still read.
-            trimBufferFront(nextChunkStart - LEFT_CONTEXT_SAMPLES)
+            trimBufferFront(nextChunkStart - RETRY_LEFT_CONTEXT_SAMPLES)
         }
 
         // Flush the remaining audio (decode all leftover chunks with whatever right context is
@@ -1751,11 +1804,12 @@ class InferenceRepository(
         // threshold; only when every attempt is blank/garbage is a "Low confidence"
         // Failure emitted. Long utterances keep the plain continue-from-state decode.
         suspend fun flushAsFinal(isUtteranceBoundary: Boolean) {
+            RecordingTrace.log { "final flush samples=$totalSamples tokens=${allTokens.size} boundary=$isUtteranceBoundary" }
             val isShort = totalSamples < SHORT_UTTERANCE_THRESHOLD_SAMPLES
 
             // Snapshot the session-start decode state so a short-utterance attempt can
             // re-decode the original buffer from frame 0. For < 2.5 s utterances the
-            // buffer is never front-trimmed (the first chunk needs 2.04 s of audio before
+            // buffer is never front-trimmed (the first chunk needs 6 s of audio before
             // decodeReadyChunks runs), so the snapshot is the complete utterance.
             val savedBuffer = if (isShort) buffer.toList() else null
             val savedTotalSamples = totalSamples
@@ -1858,6 +1912,7 @@ class InferenceRepository(
                 raw.cleanTranscript(language = engine.currentLanguage, formatNumbersAsDigits = formatNumbersAsDigits)
             else raw
             val finalText = if (cleaned.isBlank()) raw else cleaned
+            RecordingTrace.log { "final text rawChars=${raw.length} cleanedChars=${finalText.length} tokens=${allTokens.size}" }
             val base = TranscriptResult.Final(finalText, isUtteranceBoundary = isUtteranceBoundary, confidence = confidence)
             val toSend = if (isScriptHallucination(finalText, engine.currentLanguage)) {
                 val stripped = stripScriptHallucinations(finalText, engine.currentLanguage)
@@ -1915,6 +1970,97 @@ class InferenceRepository(
             streamFailure?.let { send(TranscriptResult.Failure(it)) }
         }
     }.flowOn(Dispatchers.Default)
+
+    /** Streams model-owned windows and starts a fresh decoder at each silence boundary. */
+    private fun modelStreamingTranscribe(
+        streaming: StreamingSpeechEngine,
+        audio: Flow<AudioChunk>,
+        postprocessingEnabled: Boolean,
+        formatNumbersAsDigits: Boolean,
+        recordingId: Long,
+    ): Flow<TranscriptResult> = flow {
+        acousticCache.clear()
+        var stream: SpeechStream? = null
+        var committedText = false
+        var utterance = 0
+        val producedSamples = AtomicLong()
+        val audioEndedAt = AtomicLong()
+        var consumedSamples = 0L
+        var nextQueueReport = 0L
+        fun clean(text: String): String {
+            val cleaned = if (postprocessingEnabled) text.cleanTranscript(
+                language = streaming.currentLanguage,
+                formatNumbersAsDigits = formatNumbersAsDigits,
+                skipSpuriousPeriods = true,
+            ) else text
+            return if (isScriptHallucination(cleaned, streaming.currentLanguage))
+                stripScriptHallucinations(cleaned, streaming.currentLanguage).orEmpty() else cleaned
+        }
+        suspend fun finish(boundary: Boolean) {
+            val active = stream ?: return
+            val started = System.nanoTime()
+            RecordingTrace.log { "stream finish begin session=$recordingId utterance=$utterance boundary=$boundary" }
+            val result = active.finish()
+            RecordingTrace.log { "stream finish end session=$recordingId utterance=$utterance durationMs=${(System.nanoTime() - started) / 1_000_000}" }
+            active.close()
+            stream = null
+            val text = clean(result.text)
+            if (text.any { it.isLetterOrDigit() }) {
+                emit(applyGrammarCorrection(result.copy(text = text, isUtteranceBoundary = boundary), streaming.currentLanguage))
+                committedText = true
+            } else if (!boundary && !committedText) {
+                emit(TranscriptResult.NoSpeech)
+            }
+        }
+        try {
+            audio.map { chunk ->
+                if (BuildConfig.DEBUG) producedSamples.addAndGet(chunk.samples.size.toLong())
+                TimedAudio(chunk, if (BuildConfig.DEBUG) System.nanoTime() else 0L)
+            }.onCompletion { cause ->
+                if (cause == null) {
+                    audioEndedAt.set(System.nanoTime())
+                    RecordingTrace.log { "audio ended session=$recordingId producedSamples=${producedSamples.get()}" }
+                }
+            }.buffer(Channel.UNLIMITED).collect { queued ->
+                val incoming = queued.chunk
+                val now = System.nanoTime()
+                if (BuildConfig.DEBUG && (now >= nextQueueReport || incoming.isSilenceBoundary)) {
+                    RecordingTrace.log {
+                        "audio queue session=$recordingId utterance=$utterance consumedSamples=$consumedSamples queuedMs=${(producedSamples.get() - consumedSamples) / 16} oldestMs=${(now - queued.enqueuedAtNanos) / 1_000_000}"
+                    }
+                    nextQueueReport = now + 1_000_000_000L
+                }
+                if (incoming.isSilenceBoundary) {
+                    finish(boundary = true)
+                } else if (incoming.samples.isNotEmpty()) {
+                    require(incoming.sampleRate == 16_000) { "Streaming audio must be 16 kHz" }
+                    val active = stream ?: streaming.newStream().also {
+                        stream = it
+                        utterance++
+                        RecordingTrace.log { "stream opened session=$recordingId utterance=$utterance" }
+                    }
+                    active.accept(incoming.samples)?.let { partial ->
+                        val text = clean(partial.text)
+                        if (text.any { it.isLetterOrDigit() }) emit(partial.copy(text = text))
+                    }
+                }
+                consumedSamples += incoming.samples.size
+            }
+            RecordingTrace.log {
+                "audio queue drained session=$recordingId consumedSamples=$consumedSamples afterAudioEndMs=${(System.nanoTime() - audioEndedAt.get()) / 1_000_000}"
+            }
+            if (stream == null && !committedText) emit(TranscriptResult.NoSpeech)
+            else finish(boundary = false)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            emit(TranscriptResult.Failure(failure))
+        } finally {
+            stream?.close()
+        }
+    }
+
+    private data class TimedAudio(val chunk: AudioChunk, val enqueuedAtNanos: Long)
 
     /**
      * Legacy whole-window re-transcription path. Used when the configured engine is not a

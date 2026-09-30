@@ -5,7 +5,7 @@ sealed class TranscriptResult {
 
     /**
      * In-progress transcript from streaming inference.
-     * The keyboard should show [text] as composing (underlined) text.
+     * The keyboard shows [text] in its recording preview, without editor writes.
      *
      * [confidence] is the engine's per-token geometric-mean probability in [0.0, 1.0]
      * (1.0 when the engine does not surface per-token log-probs). Used by
@@ -18,11 +18,11 @@ sealed class TranscriptResult {
 
     /**
      * Final, confirmed transcript for a completed utterance.
-     * The keyboard should commit [text] to the active input field.
+     * The keyboard accumulates [text] until the complete recording is ready to insert.
      *
      * [isUtteranceBoundary] is true when this Final was emitted mid-session by the VAD
      * silence-boundary handler. The recording session is still active and the keyboard
-     * must NOT tear down capture state — only commit the text and continue listening.
+     * retains the utterance in its preview and continues listening.
      * When false (the default), this is a true session-ending Final.
      *
      * [confidence] is the engine's per-token geometric-mean probability in [0.0, 1.0]
@@ -40,17 +40,10 @@ sealed class TranscriptResult {
     /**
      * The rolling audio window was trimmed to prevent attention drift.
      *
-     * [TextInjector] must call [resetAfterTrim][dev.brgr.outspoke.ime.TextInjector.resetAfterTrim]
-     * when it receives this so that its committed-word tracking is shrunk to the words most
-     * likely to still be inside the retained tail audio.  Without this, the suffix-overlap
-     * alignment in [setPartial][dev.brgr.outspoke.ime.TextInjector.setPartial] fails for
-     * every stride after the trim and middle sentences are silently dropped.
-     *
-     * [stableWords] carries the confirmed-stable leading words from the partial that triggered
-     * the trim (up to [safeStableCount] words from InferenceRepository).  TextInjector uses
-     * them as the new [committedWords] anchor directly, bypassing the field re-read which may
-     * be stale when the composing span was stuck (RC-3 / P4 fix).  Defaults to an empty list
-     * for force-trims and silence-trims where no stable word list exists.
+     * RecordingTranscript keeps the dropped prefix in memory and reconciles the next
+     * window's overlapping hypothesis. [stableWords] contains the confirmed stable prefix
+     * when available; it is empty for force/silence trims. Legacy composing-text callers
+     * use TextInjector.resetAfterTrim to maintain their field alignment.
      */
     data class WindowTrimmed(val stableWords: List<String> = emptyList()) : TranscriptResult()
 
