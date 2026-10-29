@@ -158,6 +158,8 @@ fun SpeechPreferencesScreen(
             onCancelDownload = viewModel::cancelDownload,
             onDeleteLanguage = viewModel::deleteLanguage,
         )
+        HorizontalDivider()
+        ServerTranscriptionSection()
     }
 }
 

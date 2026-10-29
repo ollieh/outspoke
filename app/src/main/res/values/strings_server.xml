@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="pref_server_title">Server transcription</string>
+    <string name="pref_server_summary">Optional. When you stop recording, Outspoke also sends the recording to your own OpenAI-compatible server and uses its text if it arrives in time. Otherwise the phone\'s text is used. The server transcribes English only. Leave the URL empty to keep audio on this device.</string>
+    <string name="pref_server_url_label">Server URL</string>
+    <string name="pref_server_url_example">http://100.64.0.1:8000</string>
+    <string name="pref_server_url_invalid">Enter an http:// or https:// address.</string>
+    <string name="pref_server_off">Off: transcription stays on this device.</string>
+    <string name="pref_server_url_on">Recordings are sent to this server.</string>
+    <string name="pref_server_url_cleartext">http:// is unencrypted. Use it only over Tailscale or another private network.</string>
+    <string name="pref_server_key_label">API key (optional)</string>
+    <string name="pref_server_key_show">Show</string>
+    <string name="pref_server_key_hide">Hide</string>
+    <string name="pref_server_key_not_stored">The API key could not be stored securely. Try saving again.</string>
+    <string name="pref_server_model_label">Model (optional)</string>
+    <string name="pref_server_model_hint">Empty: use the first model the server lists.</string>
+    <string name="pref_server_grace_label">Wait for server (ms)</string>
+    <string name="pref_server_grace_hint">After you stop, how long the phone\'s finished text may wait for the server. Default 2000.</string>
+    <string name="pref_server_grace_invalid">Enter a number from 0 to 10000.</string>
+    <string name="pref_server_test">Test connection</string>
+    <string name="pref_server_testing">Testing…</string>
+    <string name="pref_server_save">Save</string>
+    <string name="pref_server_test_ok">Connected. Models: %1$s</string>
+    <string name="pref_server_test_filled">Connected. Model set to %1$s. Tap Save to keep it.</string>
+    <string name="pref_server_error_unreachable">Cannot reach the server. Check the address and that Tailscale is connected.</string>
+    <string name="pref_server_error_timeout">The server did not answer in time.</string>
+    <string name="pref_server_error_cleartext">Android blocked the unencrypted connection.</string>
+    <string name="pref_server_error_unauthorized">The server rejected the API key (HTTP %1$d).</string>
+    <string name="pref_server_error_http">The server answered HTTP %1$d. Check the URL.</string>
+    <string name="pref_server_error_bad_response">The server\'s answer is not an OpenAI-compatible model list.</string>
+    <string name="pref_server_error_no_models">The server lists no models. Enter the model name yourself.</string>
+</resources>
