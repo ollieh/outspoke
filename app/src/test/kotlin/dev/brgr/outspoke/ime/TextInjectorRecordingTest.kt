@@ -3,6 +3,7 @@ package dev.brgr.outspoke.ime
 import android.text.InputType
 import android.view.KeyEvent
 import android.view.inputmethod.EditorInfo
+import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -44,30 +45,71 @@ class TextInjectorRecordingTest {
     }
 
     @Test
-    fun `send performs the declared action even in a multi-line field`() {
+    fun `send performs a declared send action even in a multi-line field`() = runTest {
         val field = FakeInputConnection()
         val chat = TextInjector(field, EditorInfo().apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
             imeOptions = EditorInfo.IME_ACTION_SEND or EditorInfo.IME_FLAG_NO_EXTRACT_UI
         })
         assertThat(chat.enterAction).isEqualTo(EnterAction.NEWLINE)
-        assertThat(chat.send()).isTrue()
+        assertThat(chat.send()).isEqualTo(SendOutcome.EDITOR_ACTION)
         assertThat(field.submissions.map { it.editorAction }).containsExactly(EditorInfo.IME_ACTION_SEND)
         assertThat(field.commitCalls).isEmpty()
     }
 
     @Test
-    fun `send presses Enter in an editor without a declared action`() {
-        val field = FakeInputConnection()
-        val chat = TextInjector(field, EditorInfo().apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI
-        })
-        assertThat(chat.send()).isTrue()
-        val keys = field.submissions.map { requireNotNull(it.keyEvent) }
-        assertThat(keys.map { it.keyCode to it.action })
-            .containsExactly(KeyEvent.KEYCODE_ENTER to KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER to KeyEvent.ACTION_UP)
-        assertThat(keys).allMatch { it.flags and KeyEvent.FLAG_SOFT_KEYBOARD != 0 }
-        assertThat(field.commitCalls).isEmpty()
+    fun `send asks a chat box for its send action instead of the Done Android filled in`() = runTest {
+        // Telegram's message box: multi-line with Android's default Done, sends on IME_ACTION_SEND.
+        val field = chatBox("Hello").apply {
+            onEditorAction = { if (it == EditorInfo.IME_ACTION_SEND) clearField() }
+        }
+        assertThat(injector(field, EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_ENTER_ACTION).send())
+            .isEqualTo(SendOutcome.EDITOR_ACTION)
+        assertThat(field.submissions.map { it.editorAction }).containsExactly(EditorInfo.IME_ACTION_SEND)
+        assertThat(field.fieldText).isEmpty()
     }
+
+    @Test
+    fun `send presses Enter when the app ignores the send action but sends on Enter`() = runTest {
+        // e.g. WhatsApp with "Enter is send" turned on.
+        val field = chatBox("Hello").apply {
+            onKeyEvent = { if (it.keyCode == KeyEvent.KEYCODE_ENTER && it.action == KeyEvent.ACTION_DOWN) clearField() }
+        }
+        assertThat(injector(field, EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_ENTER_ACTION).send())
+            .isEqualTo(SendOutcome.ENTER_KEY)
+        assertThat(field.submissions.map { it.editorAction ?: it.keyEvent?.keyCode }).containsExactly(
+            EditorInfo.IME_ACTION_SEND, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_ENTER,
+        )
+        assertThat(field.submissions.mapNotNull { it.keyEvent }).allMatch { it.flags and KeyEvent.FLAG_SOFT_KEYBOARD != 0 }
+        assertThat(field.fieldText).isEmpty()
+    }
+
+    @Test
+    fun `send leaves the message unchanged when Enter only adds a line break`() = runTest {
+        val field = chatBox("Hello").apply {
+            onKeyEvent = { if (it.keyCode == KeyEvent.KEYCODE_ENTER && it.action == KeyEvent.ACTION_DOWN) typeNewline() }
+        }
+        assertThat(injector(field, EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_ENTER_ACTION).send())
+            .isEqualTo(SendOutcome.NOT_SENT)
+        assertThat(field.fieldText).isEqualTo("Hello")
+    }
+
+    @Test
+    fun `send trusts a declared search action without pressing Enter`() = runTest {
+        // A search box keeps its query, so an empty field is not the signal here.
+        val field = chatBox("weather")
+        val search = TextInjector(field, EditorInfo().apply {
+            inputType = InputType.TYPE_CLASS_TEXT
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+        })
+        assertThat(search.send()).isEqualTo(SendOutcome.EDITOR_ACTION)
+        assertThat(field.submissions.map { it.editorAction }).containsExactly(EditorInfo.IME_ACTION_SEARCH)
+    }
+
+    private fun chatBox(text: String) = FakeInputConnection().apply { commitText(text, 1) }
+
+    private fun injector(field: FakeInputConnection, imeOptions: Int) = TextInjector(field, EditorInfo().apply {
+        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        this.imeOptions = imeOptions
+    })
 }

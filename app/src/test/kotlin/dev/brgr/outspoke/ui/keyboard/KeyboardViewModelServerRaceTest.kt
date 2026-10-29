@@ -173,7 +173,8 @@ class KeyboardViewModelServerRaceTest {
 
     private fun TestScope.withKeyboard(
         engine: StreamingSpeechEngine,
-        settings: ServerTranscriptionSettings = ServerTranscriptionSettings(baseUrl = "http://vps:8000"),
+        // A fixed grace keeps these hook tests independent of which side finishes first.
+        settings: ServerTranscriptionSettings = ServerTranscriptionSettings(baseUrl = "https://vps:8000", graceMs = 2_000),
         server: suspend () -> String,
         configure: suspend (AppPreferences) -> Unit = {},
         startWhen: (KeyboardViewModel) -> Boolean = { true },

@@ -6,7 +6,6 @@ import android.text.InputType
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnectionWrapper
 import androidx.lifecycle.ViewModelStore
-import android.view.KeyEvent
 import dev.brgr.outspoke.audio.AudioCaptureManager
 import dev.brgr.outspoke.ime.DictationRescue
 import dev.brgr.outspoke.ime.FakeInputConnection
@@ -221,7 +220,9 @@ class KeyboardViewModelRecordingTest {
     fun `send inserts the dictation and then performs the editor's send action`() = runTest {
         val engine = PreviewEngine()
         withKeyboard(engine) { model, _, sources ->
-            val chat = FakeInputConnection()
+            val chat = FakeInputConnection().apply {
+                onEditorAction = { if (it == EditorInfo.IME_ACTION_SEND) clearField() }
+            }
             model.setTextInjector(TextInjector(chat, EditorInfo().apply {
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 imeOptions = EditorInfo.IME_ACTION_SEND
@@ -238,6 +239,7 @@ class KeyboardViewModelRecordingTest {
             assertThat(chat.submissions).containsExactly(
                 FakeInputConnection.Submission(EditorInfo.IME_ACTION_SEND, null, "UI works."),
             )
+            assertThat(chat.fieldText).isEmpty()
         }
     }
 
@@ -245,10 +247,14 @@ class KeyboardViewModelRecordingTest {
     fun `enter while dictating finishes and sends, and inserts a newline when idle`() = runTest {
         val engine = PreviewEngine()
         withKeyboard(engine) { model, _, sources ->
-            // A Telegram-style message box: multi-line, no declared IME action.
-            val chat = FakeInputConnection()
+            // Telegram's message box: multi-line with Android's default Done; it sends on
+            // IME_ACTION_SEND and then empties the field.
+            val chat = FakeInputConnection().apply {
+                onEditorAction = { if (it == EditorInfo.IME_ACTION_SEND) clearField() }
+            }
             model.setTextInjector(TextInjector(chat, EditorInfo().apply {
                 inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_ENTER_ACTION
             }))
             model.onRecordStart()
             awaitCondition { sources.isNotEmpty() }
@@ -257,12 +263,12 @@ class KeyboardViewModelRecordingTest {
             model.performEnterAction()
             engine.release.countDown()
             awaitCondition { model.uiState.value == KeyboardUiState.Idle }
-            assertThat(chat.fieldText).isEqualTo("UI works.")
-            assertThat(chat.submissions.map { it.keyEvent?.keyCode to it.keyEvent?.action })
-                .containsExactly(KeyEvent.KEYCODE_ENTER to KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER to KeyEvent.ACTION_UP)
-            assertThat(chat.submissions.map { it.fieldText }).containsOnly("UI works.")
+            assertThat(chat.submissions).containsExactly(
+                FakeInputConnection.Submission(EditorInfo.IME_ACTION_SEND, null, "UI works."),
+            )
+            assertThat(chat.fieldText).isEmpty()
             model.performEnterAction()
-            assertThat(chat.fieldText).isEqualTo("UI works.\n")
+            assertThat(chat.fieldText).isEqualTo("\n")
         }
     }
 

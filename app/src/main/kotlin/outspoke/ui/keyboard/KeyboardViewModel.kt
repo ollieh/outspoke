@@ -8,6 +8,7 @@ import dev.brgr.outspoke.audio.AudioCaptureManager
 import dev.brgr.outspoke.audio.AudioChunk
 import dev.brgr.outspoke.ime.DictationRescue
 import dev.brgr.outspoke.ime.EnterAction
+import dev.brgr.outspoke.ime.SendOutcome
 import dev.brgr.outspoke.ime.TextInjector
 import dev.brgr.outspoke.ime.WordSuggestionProvider
 import dev.brgr.outspoke.inference.EngineState
@@ -503,6 +504,9 @@ class KeyboardViewModel(
     /** The IME checks that it is still selected before switching keyboards. */
     var onReturnToPreviousKeyboard: (() -> Unit)? = null
 
+    /** The text was inserted but the app would not send it; the IME tells the user. */
+    var onSendFailed: (() -> Unit)? = null
+
     fun onKeyboardShown() {
         RecordingTrace.log { "keyboard shown alreadyVisible=$keyboardVisible" }
         if (keyboardVisible) return
@@ -780,7 +784,7 @@ class KeyboardViewModel(
             }
             return false
         }
-        if (s.send) editor.send()
+        if (s.send && editor.send() == SendOutcome.NOT_SENT) onSendFailed?.invoke()
         if (foreground) {
             Log.d(TAG, "Transcription flow completed - resetting to Idle")
             _isContinuousMode.value = false

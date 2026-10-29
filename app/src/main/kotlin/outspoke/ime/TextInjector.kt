@@ -14,8 +14,22 @@ import dev.brgr.outspoke.ime.TranscriptAligner.stripComposingOverlap
 import dev.brgr.outspoke.ime.TranscriptAligner.wordsMatch
 import dev.brgr.outspoke.ui.keyboard.WordAtCursor
 import dev.brgr.outspoke.inference.RecordingTrace
+import kotlinx.coroutines.delay
 
 private const val TAG = "TextInjector"
+
+/** IME actions that submit what was typed, as opposed to Done / Next navigation. */
+private val SUBMIT_ACTIONS = setOf(EditorInfo.IME_ACTION_SEND, EditorInfo.IME_ACTION_GO, EditorInfo.IME_ACTION_SEARCH)
+
+/** How often, and how many times, [TextInjector.send] checks whether the app sent. */
+private const val SEND_CHECK_INTERVAL_MS = 100L
+private const val SEND_CHECKS = 6
+
+/** Characters compared to spot a newline that Enter added instead of sending. */
+private const val SEND_PROBE_CHARS = 64
+
+/** How [TextInjector.send] submitted the editor, or that it could not. */
+enum class SendOutcome { EDITOR_ACTION, ENTER_KEY, NOT_SENT }
 
 /**
  * How many words at the tail of the transcript remain editable (composing text).
@@ -942,27 +956,70 @@ class TextInjector(
     }
 
     /**
-     * Submits the editor, e.g. sends the chat message, regardless of [enterAction]:
-     * performs the editor's declared IME action (send, search, go, …) even in multi-line
-     * fields. An editor that declares none receives an Enter key press instead, which
-     * chat apps with an "Enter sends" setting treat as send.
+     * Submits the editor, e.g. sends the chat message, regardless of [enterAction].
+     *
+     * A submitting action the editor declares (send, search, go) is performed even in a
+     * multi-line field, and trusted. Chat boxes usually declare nothing (Android fills in
+     * Done, which apps ignore), so each fallback is tried until the field clears, which
+     * is what a chat app does once the message is sent:
+     *  1. [EditorInfo.IME_ACTION_SEND], which Telegram handles.
+     *  2. An Enter key press, which apps with an "Enter sends" setting handle.
+     * If Enter only added a line break, it is removed again and [SendOutcome.NOT_SENT]
+     * tells the caller to ask the user to tap the app's send button.
      */
-    fun send(): Boolean {
+    suspend fun send(): SendOutcome {
         val declared = editorInfo.imeOptions and EditorInfo.IME_MASK_ACTION
-        if (declared != EditorInfo.IME_ACTION_NONE && declared != EditorInfo.IME_ACTION_UNSPECIFIED) {
-            RecordingTrace.log { "send editorAction=$declared" }
-            return inputConnection.performEditorAction(declared)
+        RecordingTrace.log {
+            "send app=${editorInfo.packageName} imeOptions=0x${editorInfo.imeOptions.toString(16)} " +
+                "inputType=0x${editorInfo.inputType.toString(16)}"
         }
-        RecordingTrace.log { "send enterKey" }
+        if (declared in SUBMIT_ACTIONS) {
+            inputConnection.performEditorAction(declared)
+            RecordingTrace.log { "send result=declared-action action=$declared" }
+            return SendOutcome.EDITOR_ACTION
+        }
+        inputConnection.performEditorAction(EditorInfo.IME_ACTION_SEND)
+        if (awaitSubmitted()) {
+            RecordingTrace.log { "send result=send-action" }
+            return SendOutcome.EDITOR_ACTION
+        }
+        val before = inputConnection.getTextBeforeCursor(SEND_PROBE_CHARS, 0)?.toString()
+        pressEnter()
+        if (awaitSubmitted()) {
+            RecordingTrace.log { "send result=enter-key" }
+            return SendOutcome.ENTER_KEY
+        }
+        val after = inputConnection.getTextBeforeCursor(SEND_PROBE_CHARS + 1, 0)?.toString()
+        val addedNewline = before != null && after == before + "\n"
+        if (addedNewline) inputConnection.deleteSurroundingText(1, 0)
+        RecordingTrace.log { "send result=not-sent removedNewline=$addedNewline" }
+        return SendOutcome.NOT_SENT
+    }
+
+    /**
+     * True once the field is empty, checking straight away and then for up to
+     * [SEND_CHECKS] intervals. A connection that no longer answers also counts: the app
+     * restarted input, which chat apps do when they reset the field after sending.
+     */
+    private suspend fun awaitSubmitted(): Boolean {
+        repeat(SEND_CHECKS + 1) { check ->
+            if (check > 0) delay(SEND_CHECK_INTERVAL_MS)
+            val before = inputConnection.getTextBeforeCursor(1, 0) ?: return true
+            val after = inputConnection.getTextAfterCursor(1, 0) ?: return true
+            if (before.isEmpty() && after.isEmpty()) return true
+        }
+        return false
+    }
+
+    private fun pressEnter() {
         val now = SystemClock.uptimeMillis()
         val down = KeyEvent(
             now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER, 0, 0,
             KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
             KeyEvent.FLAG_SOFT_KEYBOARD or KeyEvent.FLAG_KEEP_TOUCH_MODE,
         )
-        val pressed = inputConnection.sendKeyEvent(down)
-        val released = inputConnection.sendKeyEvent(KeyEvent.changeAction(down, KeyEvent.ACTION_UP))
-        return pressed && released
+        inputConnection.sendKeyEvent(down)
+        inputConnection.sendKeyEvent(KeyEvent.changeAction(down, KeyEvent.ACTION_UP))
     }
 
     /**

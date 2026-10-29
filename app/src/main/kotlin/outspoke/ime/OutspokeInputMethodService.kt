@@ -13,6 +13,7 @@ import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
+import android.widget.Toast
 import android.view.inputmethod.InputMethodManager
 import androidx.core.view.ViewCompat
 import androidx.lifecycle.*
@@ -22,6 +23,7 @@ import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import dev.brgr.outspoke.audio.AudioCaptureManager
 import dev.brgr.outspoke.BuildConfig
+import dev.brgr.outspoke.R
 import dev.brgr.outspoke.audio.PermissionHelper
 import dev.brgr.outspoke.inference.EngineState
 import dev.brgr.outspoke.inference.InferenceService
@@ -174,6 +176,10 @@ class OutspokeInputMethodService :
                 ServerTranscriber.create(this),
             ),
         )[KeyboardViewModel::class.java]
+
+        keyboardViewModel.onSendFailed = {
+            Toast.makeText(this, R.string.send_failed, Toast.LENGTH_LONG).show()
+        }
 
         keyboardViewModel.onReturnToPreviousKeyboard = {
             val selected = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)

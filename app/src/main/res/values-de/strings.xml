@@ -180,4 +180,5 @@
         Standardquelle wird das Lautsprecher-Signal aus dem Mikrofon entfernt und es wird Stille transkribiert. In
         lauten Räumen etwas weniger saubere Aufnahme.
     </string>
+    <string name="send_failed">Diese App hat die Nachricht nicht gesendet. Tippe auf ihren Senden-Knopf.</string>
 </resources>

@@ -22,7 +22,9 @@ language stay on the phone.
 
 `stoppedAt` is when the capture completed, which is also when the upload starts.
 The server wins if its non-blank text arrives by `max(stoppedAt + grace, localReadyAt)`.
-Grace defaults to 2000 ms.
+Grace defaults to 0 ms, so whichever side finishes first wins. The phone's live V3
+result is usually ready about a second after Stop, so a fixed wait would only have
+let the server win short messages.
 
 - Server error, timeout or empty text: the phone's text is used as soon as that is known.
 - Phone failed or empty: the keyboard waits for the server; the upload is bounded at 35 s.

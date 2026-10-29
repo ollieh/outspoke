@@ -33,6 +33,28 @@ class FakeInputConnection : InputConnection {
 
     data class Submission(val editorAction: Int?, val keyEvent: KeyEvent?, val fieldText: String)
 
+    /** How the simulated app reacts to an editor action. Ignores it by default. */
+    var onEditorAction: FakeInputConnection.(Int) -> Unit = {}
+
+    /** How the simulated app reacts to a key event. Ignores it by default. */
+    var onKeyEvent: FakeInputConnection.(KeyEvent) -> Unit = {}
+
+    /** What a chat app does after sending: empties the field. */
+    fun clearField() {
+        buffer.clear()
+        composing = ""
+        composingStart = -1
+        cursorPos = 0
+        selStart = -1
+        selEnd = -1
+    }
+
+    /** What a multi-line editor does with Enter: adds a line break at the cursor. */
+    fun typeNewline() {
+        buffer.append('\n')
+        cursorPos = buffer.length
+    }
+
     /** Permanently committed text - never rewritten once written. */
     private val buffer = StringBuilder()
 
@@ -183,6 +205,7 @@ class FakeInputConnection : InputConnection {
     override fun commitCorrection(correctionInfo: CorrectionInfo?): Boolean = false
     override fun performEditorAction(editorAction: Int): Boolean {
         submissions += Submission(editorAction, null, fieldText)
+        onEditorAction(editorAction)
         return true
     }
     override fun performContextMenuAction(id: Int): Boolean = false
@@ -190,6 +213,7 @@ class FakeInputConnection : InputConnection {
     override fun endBatchEdit(): Boolean = true
     override fun sendKeyEvent(event: KeyEvent?): Boolean {
         submissions += Submission(null, event, fieldText)
+        if (event != null) onKeyEvent(event)
         return true
     }
     override fun clearMetaKeyStates(states: Int): Boolean = false

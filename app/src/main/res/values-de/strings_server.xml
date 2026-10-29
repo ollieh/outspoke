@@ -15,7 +15,7 @@
     <string name="pref_server_model_label">Modell (optional)</string>
     <string name="pref_server_model_hint">Leer: das erste Modell verwenden, das der Server auflistet.</string>
     <string name="pref_server_grace_label">Auf Server warten (ms)</string>
-    <string name="pref_server_grace_hint">Wie lange der fertige Text des Telefons nach dem Stoppen auf den Server warten darf. Standard 2000.</string>
+    <string name="pref_server_grace_hint">Wie lange der fertige Text des Telefons nach dem Stoppen auf den Server warten darf. Standard 0: Es wird verwendet, was zuerst fertig ist.</string>
     <string name="pref_server_grace_invalid">Gib eine Zahl von 0 bis 10000 ein.</string>
     <string name="pref_server_test">Verbindung testen</string>
     <string name="pref_server_testing">Teste…</string>

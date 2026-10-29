@@ -15,7 +15,7 @@
     <string name="pref_server_model_label">Model (optional)</string>
     <string name="pref_server_model_hint">Empty: use the first model the server lists.</string>
     <string name="pref_server_grace_label">Wait for server (ms)</string>
-    <string name="pref_server_grace_hint">After you stop, how long the phone\'s finished text may wait for the server. Default 2000.</string>
+    <string name="pref_server_grace_hint">After you stop, how long the phone\'s finished text may wait for the server. Default 0: whichever finishes first is used.</string>
     <string name="pref_server_grace_invalid">Enter a number from 0 to 10000.</string>
     <string name="pref_server_test">Test connection</string>
     <string name="pref_server_testing">Testing…</string>
