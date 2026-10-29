@@ -234,8 +234,11 @@ data class ChunkDecodeResult(
  *  5. detokenise     →  string via vocab.txt
  */
 class ParakeetEngine(
-    private val intraOpThreads: Int = 2,
-    private val optimizationLevel: OrtSession.SessionOptions.OptLevel = OrtSession.SessionOptions.OptLevel.BASIC_OPT,
+    // Pixel 10 Pro, V3LatencyBenchmarkTest: the live path needs 0.42x real time at 2 threads
+    // with BASIC_OPT, 0.31x at 4 threads with ALL_OPT and 0.46x at 6 (the extra threads land
+    // on slower cores). Model load also drops from 5.5 s to 4.2 s.
+    private val intraOpThreads: Int = 4,
+    private val optimizationLevel: OrtSession.SessionOptions.OptLevel = OrtSession.SessionOptions.OptLevel.ALL_OPT,
 ) : SpeechEngine, ChunkStreamingEngine {
 
     private var env: OrtEnvironment? = null
