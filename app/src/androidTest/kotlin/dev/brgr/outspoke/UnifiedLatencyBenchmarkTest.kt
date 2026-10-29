@@ -10,9 +10,6 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import kotlin.math.roundToInt
 
 /** Opt-in, real-device comparison. Uses already downloaded models and test-only audio. */
 @RunWith(AndroidJUnit4::class)
@@ -24,7 +21,7 @@ class UnifiedLatencyBenchmarkTest {
         val directory = File(instrumentation.targetContext.filesDir, "models/${ModelId.PARAKEET_UNIFIED_EN.storageDirName}")
         assertTrue("Download Unified in the debug app before benchmarking", File(directory, "encoder.int8.onnx").isFile)
         val fixtures = listOf("hello-world.wav", "natural-counting.wav").associateWith { name ->
-            instrumentation.context.assets.open("audio/$name").use { readPcm(it.readBytes()) }
+            instrumentation.context.assets.open("audio/$name").use { BenchmarkAudio.readPcm(it.readBytes()) }
         }
         for (threads in listOf(1, 2, 4)) {
             val engine = ParakeetUnifiedEngine(intraOpThreads = threads)
@@ -66,27 +63,5 @@ class UnifiedLatencyBenchmarkTest {
         val finishStart = System.nanoTime()
         val final = stream.finish()
         Measurement(final.text, (finishStart - start) / 1_000_000.0, (System.nanoTime() - finishStart) / 1_000_000.0)
-    }
-
-    /** These fixtures are mono PCM16 WAVs; resample the 22.05 kHz short clip to 16 kHz. */
-    private fun readPcm(bytes: ByteArray): ShortArray {
-        val header = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        require(String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF" &&
-            String(bytes, 8, 4, Charsets.US_ASCII) == "WAVE")
-        require(String(bytes, 12, 4, Charsets.US_ASCII) == "fmt " && header.getInt(16) == 16)
-        require(header.getShort(20).toInt() == 1 && header.getShort(22).toInt() == 1 && header.getShort(34).toInt() == 16)
-        require(String(bytes, 36, 4, Charsets.US_ASCII) == "data")
-        val sampleRate = header.getInt(24)
-        val length = header.getInt(40)
-        require(length >= 0 && length % 2 == 0 && length <= bytes.size - 44)
-        val pcm = ShortArray(length / 2) { header.getShort(44 + it * 2) }
-        if (sampleRate == 16_000) return pcm
-        val ratio = sampleRate / 16_000.0
-        return ShortArray((pcm.size / ratio).roundToInt()) { index ->
-            val position = index * ratio
-            val left = position.toInt().coerceAtMost(pcm.lastIndex)
-            val right = minOf(left + 1, pcm.lastIndex)
-            (pcm[left] + (pcm[right] - pcm[left]) * (position - left)).roundToInt().toShort()
-        }
     }
 }

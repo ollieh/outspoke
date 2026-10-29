@@ -233,7 +233,10 @@ data class ChunkDecodeResult(
  *  4. greedy TDT     →  token IDs via decoder_joint with LSTM state carry-over
  *  5. detokenise     →  string via vocab.txt
  */
-class ParakeetEngine : SpeechEngine, ChunkStreamingEngine {
+class ParakeetEngine(
+    private val intraOpThreads: Int = 2,
+    private val optimizationLevel: OrtSession.SessionOptions.OptLevel = OrtSession.SessionOptions.OptLevel.BASIC_OPT,
+) : SpeechEngine, ChunkStreamingEngine {
 
     private var env: OrtEnvironment? = null
     private var prepSession: OrtSession? = null
@@ -293,9 +296,9 @@ class ParakeetEngine : SpeechEngine, ChunkStreamingEngine {
         check(!isLoaded) { "Already loaded; call close() before reloading" }
 
         val opts = OrtSession.SessionOptions().apply {
-            setIntraOpNumThreads(2)
+            setIntraOpNumThreads(intraOpThreads)
             setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
+            setOptimizationLevel(optimizationLevel)
         }
 
         env = OrtEnvironment.getEnvironment()

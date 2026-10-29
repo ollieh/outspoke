@@ -34,3 +34,6 @@ google-services.json
 *.hprof
 /local/
 /.github/copilot-instructions.md
+
+# Nix-built Android SDK (just android-sdk)
+/.android-sdk
