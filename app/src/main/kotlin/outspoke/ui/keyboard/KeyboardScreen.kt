@@ -30,7 +30,7 @@ import dev.brgr.outspoke.ui.theme.OutspokeKeyboardTheme
  * Layout (top → bottom):
  *  1. [StatusIndicator] - crossfades between Idle / Listening / Processing / Error states.
  *  2. [WaveformBar]     - animates with real-time amplitude. While dictating, the
- *     [RecordingControls] row (Discard · waveform · Done · Send) takes its place.
+ *     [RecordingControls] row (Discard · waveform) takes its place.
  *  3. Bottom row (left → right):
  *       [Delete All] · [Delete Word] · [TalkButton] · [Delete Char] · [Switch Keyboard]
  *     The outer pair is pinned to each edge; the TalkButton stays centred with equal
@@ -51,9 +51,7 @@ import dev.brgr.outspoke.ui.theme.OutspokeKeyboardTheme
  * @param onDeleteWord           Delete backward to the previous word boundary.
  * @param onDeleteAll            Delete all text in the current editor.
  * @param onEnterAction          Perform the context-aware Enter action (newline or IME action).
- *                               While dictating it is labelled Send and finishes, then sends.
- * @param onDone                 Finish the dictation and insert it.
- * @param onSend                 Finish the dictation, insert it, then send.
+ *                               While dictating it is labelled Send and finishes, inserts, then sends.
  * @param onDiscard              Drop the dictation without inserting it.
  * @param enterAction            The semantic action for the Enter key in the current editor.
  * @param onSwitchKeyboard       Switches the active IME back to the previous keyboard.
@@ -82,8 +80,6 @@ fun KeyboardScreen(
     onDeleteAll: () -> Unit,
     onEnterAction: () -> Unit,
     onInsertSpace: () -> Unit = {},
-    onDone: () -> Unit = {},
-    onSend: () -> Unit = {},
     onDiscard: () -> Unit = {},
     enterAction: EnterAction = EnterAction.DONE,
     onSwitchKeyboard: () -> Unit,
@@ -238,8 +234,6 @@ fun KeyboardScreen(
                     RecordingControls(
                         amplitude = amplitude,
                         onDiscard = onDiscard,
-                        onDone = onDone,
-                        onSend = onSend,
                     )
                 } else {
                     WaveformBar(
@@ -321,7 +315,8 @@ fun KeyboardScreen(
                                 tutorialPositions?.record(TutorialButtonId.DELETE_CHAR, lc)
                             },
                     )
-                    // Centre-right: context-aware Enter action; Send while dictating.
+                    // Centre-right: context-aware Enter action (a new line in chat boxes);
+                    // Send while dictating.
                     val dictating = uiState.isDictating
                     val (enterIcon, enterDescription) = if (dictating) {
                         MyIcons.Send to stringResource(R.string.action_send)
@@ -416,8 +411,6 @@ fun KeyboardScreen(
             onDeleteAll = viewModel::deleteAll,
             onEnterAction = viewModel::performEnterAction,
             onInsertSpace = viewModel::insertSpace,
-            onDone = viewModel::onDone,
-            onSend = viewModel::onSend,
             onDiscard = viewModel::onDiscard,
             enterAction = enterAction,
             // A dictation in progress is finished and inserted before switching.

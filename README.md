@@ -34,7 +34,7 @@ It uses NVIDIA's [Parakeet-TDT v3](https://huggingface.co/nvidia/parakeet-tdt-0.
 - **Space key** - insert a space directly from the keyboard
 - **Optional space after dictation** - enable it in Input preferences to append one space when the complete recording finishes, including its final transcription
 - **Optional automatic recording** - start listening when Outspoke opens, even while the model is still loading
-- **Done and Send** - finish a dictation with one tap; Send (or Enter while dictating) also sends the message. With "Return to previous keyboard" on, both switch back afterwards
+- **Send while dictating** - the Enter key turns into Send: one tap finishes the dictation, inserts it and sends the message, then switches back when "Return to previous keyboard" is on. The talk button finishes and inserts without sending, so you can still edit
 - **Dictation is kept** - clearing the field keeps the recording; if the text field or keyboard goes away first, the finished text is copied to the clipboard instead of being lost. Only Discard throws a dictation away
 - **Return to your previous keyboard** - optionally switch back after closing Outspoke, once final transcription finishes
 - **Screen stays awake while recording** - normal screen timeout resumes when capture stops

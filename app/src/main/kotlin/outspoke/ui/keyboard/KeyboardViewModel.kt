@@ -897,15 +897,11 @@ class KeyboardViewModel(
         stop(s)
     }
 
-    /** Done: finish and insert, then return to the previous keyboard if the user enabled that. */
-    fun onDone() {
-        val s = session ?: return
-        RecordingTrace.log { "done requested id=${s.id}" }
-        s.returnWhenDone = true
-        stop(s)
-    }
-
-    /** Send: like [onDone], and submits the editor (e.g. sends the message) after inserting. */
+    /**
+     * Send (Enter while dictating): finish, insert and submit the editor (e.g. send the
+     * message), then return to the previous keyboard if the user enabled that. The talk
+     * button finishes and inserts without either, leaving the keyboard up for edits.
+     */
     fun onSend() {
         val s = session ?: return
         RecordingTrace.log { "send requested id=${s.id}" }

@@ -13,7 +13,7 @@
     <string name="pref_auto_start_recording_title">Record when Outspoke opens</string>
     <string name="pref_auto_start_recording_summary">Start listening as soon as the keyboard opens, even while the speech model is still loading. Tap Done or the microphone to stop.</string>
     <string name="pref_return_keyboard_title">Return to previous keyboard</string>
-    <string name="pref_return_keyboard_summary">After Done or Send, or when Outspoke closes, finish the dictation and switch back to the keyboard you used before it.</string>
+    <string name="pref_return_keyboard_summary">After sending with Enter while dictating, or when Outspoke closes, finish the dictation and switch back to the keyboard you used before it. Stopping with the talk button keeps Outspoke open for edits.</string>
     <string name="app_name">Outspoke</string>
     <string name="ime_name">Outspoke Voice Keyboard</string>
     <string name="subtype_en">English (US) - Voice</string>
@@ -33,7 +33,6 @@
     <string name="action_cancel">Cancel</string>
     <string name="action_delete">Delete</string>
     <string name="action_retry">Retry</string>
-    <string name="action_done">Done</string>
     <string name="action_send">Send</string>
     <string name="action_set_as_active">Set as Active</string>
     <string name="action_download_anyway">Download anyway</string>

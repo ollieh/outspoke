@@ -297,19 +297,41 @@ class KeyboardViewModelRecordingTest {
     }
 
     @Test
-    fun `done returns to the previous keyboard after inserting when enabled`() = runTest {
+    fun `send returns to the previous keyboard after sending when enabled`() = runTest {
         val engine = PreviewEngine()
         withKeyboard(engine, configure = { it.setReturnToPreviousKeyboard(true) }) { model, field, sources ->
-            var textAtReturn: String? = null
-            model.onReturnToPreviousKeyboard = { textAtReturn = field.fieldText }
+            field.onEditorAction = { if (it == EditorInfo.IME_ACTION_SEND) clearField() }
+            var submissionsAtReturn: List<FakeInputConnection.Submission>? = null
+            model.onReturnToPreviousKeyboard = { submissionsAtReturn = field.submissions.toList() }
             model.onRecordStart()
             awaitCondition { sources.isNotEmpty() }
             sources.remove().frames.add(ShortArray(480) { 1000 })
             awaitCondition { model.uiState.value is KeyboardUiState.Processing }
-            model.onDone()
+            model.performEnterAction()
             engine.release.countDown()
-            awaitCondition { textAtReturn != null }
-            assertThat(textAtReturn).isEqualTo("UI works.")
+            awaitCondition { submissionsAtReturn != null }
+            assertThat(submissionsAtReturn).containsExactly(
+                FakeInputConnection.Submission(EditorInfo.IME_ACTION_SEND, null, "UI works."),
+            )
+        }
+    }
+
+    @Test
+    fun `the talk button finishes and stays on the keyboard for edits`() = runTest {
+        val engine = PreviewEngine()
+        withKeyboard(engine, configure = { it.setReturnToPreviousKeyboard(true) }) { model, field, sources ->
+            var returns = 0
+            model.onReturnToPreviousKeyboard = { returns++ }
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            sources.remove().frames.add(ShortArray(480) { 1000 })
+            awaitCondition { model.uiState.value is KeyboardUiState.Processing }
+            model.onRecordStop()
+            engine.release.countDown()
+            awaitCondition { model.uiState.value == KeyboardUiState.Idle }
+            repeat(10) { runCurrent(); Thread.sleep(5) }
+            assertThat(field.fieldText).isEqualTo("UI works.")
+            assertThat(returns).isZero()
         }
     }
 
