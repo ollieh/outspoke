@@ -9,8 +9,9 @@ import dev.brgr.outspoke.inference.CustomWordCorrector
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
-// Single DataStore instance per process - the delegate ensures this.
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "outspoke_prefs")
+// Single DataStore instance per process - the delegate ensures this. Internal so
+// ServerTranscriptionPreferences shares it.
+internal val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "outspoke_prefs")
 
 /**
  * Thin wrapper around [DataStore<Preferences>] that exposes typed [Flow]s and suspend setters

@@ -6,15 +6,14 @@
 -->
 <data-extraction-rules>
     <cloud-backup>
+        <!-- Encrypted with a device-bound Keystore key; useless on another device. -->
+        <exclude domain="sharedpref" path="outspoke_server_secret.xml"/>
         <!-- TODO: Use <include> and <exclude> to control what is backed up.
         <include .../>
         <exclude .../>
         -->
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="sharedpref" path="outspoke_server_secret.xml"/>
     </device-transfer>
-    -->
 </data-extraction-rules>
