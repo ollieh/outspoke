@@ -37,7 +37,9 @@ import dev.brgr.outspoke.ui.theme.OutspokeKeyboardTheme
  * Crossfades between six distinct visual states driven by [uiState].
  *
  * - [KeyboardUiState.Idle]          → small grey mic icon (+ diagnostics badge if non-clean)
- * - [KeyboardUiState.Listening]     → pulsing filled circle (accent colour)
+ * - [KeyboardUiState.MicStarting]   → spinner + "Starting microphone…"
+ * - [KeyboardUiState.Listening]     → pulsing filled circle (accent colour) + "Listening",
+ *                                     noting a model that is still loading
  * - [KeyboardUiState.Processing]    → spinner + partial transcript text
  * - [KeyboardUiState.Transcribing]  → transcript preview + "Finishing…" label
  * - [KeyboardUiState.Error]         → warning icon + error message + recovery action(s)
@@ -75,9 +77,10 @@ fun StatusIndicator(
     ) { state ->
         when (state) {
             is KeyboardUiState.Idle -> IdleIndicator(diagnostics = diagnostics)
-            is KeyboardUiState.Listening -> ListeningIndicator()
+            is KeyboardUiState.MicStarting -> MicStartingIndicator()
+            is KeyboardUiState.Listening -> ListeningIndicator(state.modelLoading)
             is KeyboardUiState.Processing -> ProcessingIndicator(partial = state.partial)
-            is KeyboardUiState.Transcribing -> TranscribingIndicator(state.partial)
+            is KeyboardUiState.Transcribing -> TranscribingIndicator(state.partial, state.modelLoading)
             is KeyboardUiState.Error -> {
                 val isTransient = state.reason in setOf(
                     KeyboardUiState.ErrorReason.TranscriptionFailed,
@@ -152,8 +155,23 @@ private fun IdleIndicator(diagnostics: PipelineDiagnostics = PipelineDiagnostics
     }
 }
 
+/** Recording was requested; nothing is shown as listening until the mic delivers audio. */
 @Composable
-private fun ListeningIndicator() {
+private fun MicStartingIndicator() {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        GradientArcSpinner(modifier = Modifier.size(16.dp))
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = stringResource(R.string.status_mic_starting),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+    }
+}
+
+@Composable
+private fun ListeningIndicator(modelLoading: Boolean) {
     val infiniteTransition = rememberInfiniteTransition(label = "listeningPulse")
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 1.0f,
@@ -165,13 +183,25 @@ private fun ListeningIndicator() {
         label = "pulseScale",
     )
 
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = Modifier
-            .size(20.dp)
-            .scale(pulseScale)
-            .background(MaterialTheme.colorScheme.primary, CircleShape),
-    ) { /* pulsing filled circle - no inner content needed */ }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(20.dp)
+                .scale(pulseScale)
+                .background(MaterialTheme.colorScheme.primary, CircleShape),
+        ) { /* pulsing filled circle - no inner content needed */ }
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = stringResource(
+                if (modelLoading) R.string.status_listening_model_loading else R.string.status_listening
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
 }
 
 @Composable
@@ -195,14 +225,16 @@ private fun ProcessingIndicator(partial: String) {
 
 /** Shown after the mic stops while the engine is still running its final inference pass. */
 @Composable
-private fun TranscribingIndicator(partial: String) {
+private fun TranscribingIndicator(partial: String, modelLoading: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         GradientArcSpinner(modifier = Modifier.size(16.dp))
         Spacer(modifier = Modifier.width(8.dp))
         Column(modifier = Modifier.weight(1f)) {
             if (partial.isNotEmpty()) TranscriptPreview(partial)
             Text(
-                text = stringResource(R.string.status_transcribing),
+                text = stringResource(
+                    if (modelLoading) R.string.status_transcribing_model_loading else R.string.status_transcribing
+                ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -372,7 +404,13 @@ private fun StatusIdlePreview() {
 @Preview(showBackground = true, backgroundColor = 0xFF111111)
 @Composable
 private fun StatusListeningPreview() {
-    OutspokeKeyboardTheme { StatusIndicator(uiState = KeyboardUiState.Listening) }
+    OutspokeKeyboardTheme { StatusIndicator(uiState = KeyboardUiState.Listening()) }
+}
+
+@Preview(showBackground = true, backgroundColor = 0xFF111111)
+@Composable
+private fun StatusListeningModelLoadingPreview() {
+    OutspokeKeyboardTheme { StatusIndicator(uiState = KeyboardUiState.Listening(modelLoading = true)) }
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFF111111)

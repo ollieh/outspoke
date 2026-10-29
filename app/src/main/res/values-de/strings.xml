@@ -122,8 +122,17 @@
     <string name="notif_engine_ready">Outspoke bereit (%s)</string>
     <string name="notif_engine_failed">Engine konnte nicht geladen werden: %s</string>
 
+    <!-- Dictation that could not be inserted into its text field -->
+    <string name="clip_label_dictation">Outspoke-Diktat</string>
+    <string name="toast_dictation_copied">Outspoke konnte dein Diktat nicht in dieses Feld einfügen. Es liegt in der Zwischenablage.</string>
+    <string name="toast_dictation_lost">Outspoke wurde geschlossen, bevor das Sprachmodell geladen war. Dein Diktat konnte nicht transkribiert werden.</string>
+
     <!-- Keyboard status messages -->
     <string name="status_transcribing">Wird abgeschlossen …</string>
+    <string name="status_transcribing_model_loading">Wird abgeschlossen · Sprachmodell wird geladen …</string>
+    <string name="status_mic_starting">Mikrofon wird gestartet …</string>
+    <string name="status_listening">Hört zu</string>
+    <string name="status_listening_model_loading">Hört zu · Sprachmodell wird geladen</string>
     <string name="status_error_insertion">Der Text konnte nicht eingefügt werden.</string>
     <string name="status_engine_model_missing">Modell nicht heruntergeladen - Outspoke öffnen</string>
     <string name="status_engine_loading">Transkriptions-Engine wird geladen …</string>
@@ -149,6 +158,7 @@
     <string name="tutorial_delete_char_desc">Entfernt das letzte Zeichen.</string>
     <string name="tutorial_enter_title">Eingabe / Aktion (ganz rechts)</string>
     <string name="tutorial_enter_desc">Führt die kontextabhängige Aktion aus: Senden, Suchen, Los oder Neue Zeile.
+        Während du diktierst, schließt sie ab, fügt den Text ein und sendet.
     </string>
     <string name="tutorial_skip">Überspringen</string>
     <string name="tutorial_next">Weiter</string>

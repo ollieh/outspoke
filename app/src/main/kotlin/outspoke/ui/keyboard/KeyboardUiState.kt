@@ -5,8 +5,14 @@ sealed class KeyboardUiState {
     /** Mic is idle - waiting for the user to press the talk button. */
     object Idle : KeyboardUiState()
 
-    /** Mic is active and audio is being captured. */
-    object Listening : KeyboardUiState()
+    /** Recording was requested; the microphone has not delivered audio yet. */
+    object MicStarting : KeyboardUiState()
+
+    /**
+     * The microphone is delivering audio. With [modelLoading] the audio is buffered
+     * and transcribed once the speech model finishes loading.
+     */
+    data class Listening(val modelLoading: Boolean = false) : KeyboardUiState()
 
     /**
      * Audio has been sent to the inference engine.
@@ -17,8 +23,9 @@ sealed class KeyboardUiState {
     /**
      * Audio capture has ended; the engine is running its final (definitive) inference
      * pass. The talk button is disabled; [partial] keeps the recording preview visible.
+     * With [modelLoading] the buffered audio waits for the speech model to load.
      */
-    data class Transcribing(val partial: String = "") : KeyboardUiState()
+    data class Transcribing(val partial: String = "", val modelLoading: Boolean = false) : KeyboardUiState()
 
     /**
      * The model detected audio but could not resolve a word (e.g. a short utterance whose
@@ -57,3 +64,12 @@ sealed class KeyboardUiState {
         EngineStarting,
     }
 }
+
+/** From the record request until the dictation is inserted, copied or discarded. */
+val KeyboardUiState.isDictating: Boolean
+    get() = isCapturing || this is KeyboardUiState.Transcribing
+
+/** The microphone is open or opening. */
+val KeyboardUiState.isCapturing: Boolean
+    get() = this is KeyboardUiState.MicStarting || this is KeyboardUiState.Listening ||
+            this is KeyboardUiState.Processing

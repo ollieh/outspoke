@@ -6,7 +6,9 @@ import android.text.InputType
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnectionWrapper
 import androidx.lifecycle.ViewModelStore
+import android.view.KeyEvent
 import dev.brgr.outspoke.audio.AudioCaptureManager
+import dev.brgr.outspoke.ime.DictationRescue
 import dev.brgr.outspoke.ime.FakeInputConnection
 import dev.brgr.outspoke.ime.TextInjector
 import dev.brgr.outspoke.ime.WordSuggestionProvider
@@ -19,8 +21,11 @@ import dev.brgr.outspoke.inference.StreamingSpeechEngine
 import dev.brgr.outspoke.inference.TranscriptResult
 import dev.brgr.outspoke.audio.AudioChunk
 import dev.brgr.outspoke.settings.preferences.AppPreferences
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -47,6 +52,9 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35], manifest = Config.NONE)
 class KeyboardViewModelRecordingTest {
+    private val rescue = RecordingRescue()
+    private lateinit var store: ViewModelStore
+
     @Test
     fun `revisable preview leaves the field untouched and inserts once after final decoding`() = runTest {
         val engine = PreviewEngine()
@@ -73,8 +81,10 @@ class KeyboardViewModelRecordingTest {
         }
     }
 
+    // Previously the dictation was discarded; now it is rescued, and still never
+    // inserted into the editor that replaced its own.
     @Test
-    fun `switching editor during final decode discards the pending insertion`() = runTest {
+    fun `switching editor during final decode copies the dictation instead of inserting it`() = runTest {
         val engine = PreviewEngine()
         withKeyboard(engine) { model, field, sources ->
             model.onRecordStart()
@@ -85,9 +95,10 @@ class KeyboardViewModelRecordingTest {
             awaitCondition { engine.finishing.count == 0L }
             val replacement = FakeInputConnection()
             model.setTextInjector(TextInjector(replacement, EditorInfo().apply { inputType = InputType.TYPE_CLASS_TEXT }))
+            assertThat(model.uiState.value).isEqualTo(KeyboardUiState.Idle)
             engine.release.countDown()
-            awaitCondition { engine.closed.count == 0L }
-            runCurrent()
+            awaitCondition { rescue.saved.isNotEmpty() }
+            assertThat(rescue.saved).containsExactly("UI works.")
             assertThat(field.fieldText).isEmpty()
             assertThat(replacement.fieldText).isEmpty()
         }
@@ -108,11 +119,14 @@ class KeyboardViewModelRecordingTest {
             assertThat((model.uiState.value as KeyboardUiState.Error).partial).isEqualTo("You")
             assertThat(field.fieldText).isEqualTo("Existing text")
             assertThat(field.commitCalls).containsExactly("Existing text")
+            assertThat(rescue.saved).containsExactly("You")
         }
     }
 
+    // Previously the preview was discarded; now the recording stops, finishes in the
+    // background and its text goes to the clipboard instead of the finished editor.
     @Test
-    fun `input finish discards a preview without committing it`() = runTest {
+    fun `input finish mid-recording finishes the transcription and copies it`() = runTest {
         val engine = PreviewEngine()
         withKeyboard(engine) { model, field, sources ->
             model.onRecordStart()
@@ -120,11 +134,14 @@ class KeyboardViewModelRecordingTest {
             sources.remove().frames.add(ShortArray(480) { 1000 })
             awaitCondition { model.uiState.value is KeyboardUiState.Processing }
             model.onInputFinished()
-            awaitCondition { engine.closed.count == 0L }
-            assertThat(field.commitCalls).isEmpty()
-            assertThat(field.composingCalls).isZero()
             assertThat(model.uiState.value).isEqualTo(KeyboardUiState.Idle)
             assertThat(model.isRecording.value).isFalse()
+            awaitCondition { engine.finishing.count == 0L }
+            engine.release.countDown()
+            awaitCondition { rescue.saved.isNotEmpty() }
+            assertThat(rescue.saved).containsExactly("UI works.")
+            assertThat(field.commitCalls).isEmpty()
+            assertThat(field.composingCalls).isZero()
         }
     }
 
@@ -147,25 +164,233 @@ class KeyboardViewModelRecordingTest {
             assertThat(error.reason).isEqualTo(KeyboardUiState.ErrorReason.TextInsertionFailed)
             assertThat(error.partial).isEqualTo("UI works.")
             assertThat(field.commitCalls).isEmpty()
+            assertThat(rescue.saved).containsExactly("UI works.")
         }
     }
 
+    // Previously a cleared field cancelled the recording; the dictation now survives
+    // and goes into the same, now empty, field.
     @Test
-    fun `clearing the field while finishing cancels the pending recording`() = runTest {
+    fun `clearing the field while finishing still inserts the recording`() = runTest {
         val engine = PreviewEngine()
         withKeyboard(engine) { model, field, sources ->
+            field.commitText("Draft", 1)
             model.onRecordStart()
             awaitCondition { sources.isNotEmpty() }
             sources.remove().frames.add(ShortArray(480) { 1000 })
             awaitCondition { model.uiState.value is KeyboardUiState.Processing }
             model.onRecordStop()
             awaitCondition { engine.finishing.count == 0L }
+            model.deleteAll()
             model.onFieldCleared()
+            assertThat(model.uiState.value).isEqualTo(KeyboardUiState.Transcribing("You"))
+            engine.release.countDown()
+            awaitCondition { model.uiState.value == KeyboardUiState.Idle }
+            assertThat(field.fieldText).isEqualTo("UI works.")
+            assertThat(rescue.saved).isEmpty()
+        }
+    }
+
+    @Test
+    fun `clearing the field mid-recording keeps listening and inserts everything dictated`() = runTest {
+        val engine = PreviewEngine()
+        withKeyboard(engine) { model, field, sources ->
+            field.commitText("Draft", 1)
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            val source = sources.remove()
+            source.frames.add(ShortArray(480) { 1000 })
+            awaitCondition { model.uiState.value == KeyboardUiState.Processing("You") }
+            // Backspace to empty and the delete key both reach the IME as an empty field.
+            model.deleteAll()
+            model.onFieldCleared()
+            assertThat(field.fieldText).isEmpty()
+            assertThat(model.isRecording.value).isTrue()
+            assertThat(model.uiState.value).isEqualTo(KeyboardUiState.Processing("You"))
+            source.frames.add(ShortArray(480) { 1000 })
+            awaitCondition { model.uiState.value == KeyboardUiState.Processing("UI works") }
+            assertThat(sources).describedAs("capture must not restart").isEmpty()
+            model.onRecordStop()
+            engine.release.countDown()
+            awaitCondition { model.uiState.value == KeyboardUiState.Idle }
+            assertThat(field.fieldText).isEqualTo("UI works.")
+        }
+    }
+
+    @Test
+    fun `send inserts the dictation and then performs the editor's send action`() = runTest {
+        val engine = PreviewEngine()
+        withKeyboard(engine) { model, _, sources ->
+            val chat = FakeInputConnection()
+            model.setTextInjector(TextInjector(chat, EditorInfo().apply {
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                imeOptions = EditorInfo.IME_ACTION_SEND
+            }))
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            sources.remove().frames.add(ShortArray(480) { 1000 })
+            awaitCondition { model.uiState.value is KeyboardUiState.Processing }
+            model.onSend()
+            assertThat(model.uiState.value).isInstanceOf(KeyboardUiState.Transcribing::class.java)
+            assertThat(chat.submissions).isEmpty()
+            engine.release.countDown()
+            awaitCondition { model.uiState.value == KeyboardUiState.Idle }
+            assertThat(chat.submissions).containsExactly(
+                FakeInputConnection.Submission(EditorInfo.IME_ACTION_SEND, null, "UI works."),
+            )
+        }
+    }
+
+    @Test
+    fun `enter while dictating finishes and sends, and inserts a newline when idle`() = runTest {
+        val engine = PreviewEngine()
+        withKeyboard(engine) { model, _, sources ->
+            // A Telegram-style message box: multi-line, no declared IME action.
+            val chat = FakeInputConnection()
+            model.setTextInjector(TextInjector(chat, EditorInfo().apply {
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            }))
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            sources.remove().frames.add(ShortArray(480) { 1000 })
+            awaitCondition { model.uiState.value is KeyboardUiState.Processing }
+            model.performEnterAction()
+            engine.release.countDown()
+            awaitCondition { model.uiState.value == KeyboardUiState.Idle }
+            assertThat(chat.fieldText).isEqualTo("UI works.")
+            assertThat(chat.submissions.map { it.keyEvent?.keyCode to it.keyEvent?.action })
+                .containsExactly(KeyEvent.KEYCODE_ENTER to KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER to KeyEvent.ACTION_UP)
+            assertThat(chat.submissions.map { it.fieldText }).containsOnly("UI works.")
+            model.performEnterAction()
+            assertThat(chat.fieldText).isEqualTo("UI works.\n")
+        }
+    }
+
+    @Test
+    fun `switch key waits for the final words before switching`() = runTest {
+        val engine = PreviewEngine()
+        withKeyboard(engine) { model, field, sources ->
+            var textAtSwitch: String? = null
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            sources.remove().frames.add(ShortArray(480) { 1000 })
+            awaitCondition { model.uiState.value is KeyboardUiState.Processing }
+            model.onSwitchKeyboard { textAtSwitch = field.fieldText }
+            assertThat(model.isRecording.value).isFalse()
+            assertThat(model.uiState.value).isEqualTo(KeyboardUiState.Transcribing("You"))
+            awaitCondition { engine.finishing.count == 0L }
+            runCurrent()
+            assertThat(textAtSwitch).isNull()
+            engine.release.countDown()
+            awaitCondition { textAtSwitch != null }
+            assertThat(textAtSwitch).isEqualTo("UI works.")
+            var idleSwitches = 0
+            model.onSwitchKeyboard { idleSwitches++ }
+            assertThat(idleSwitches).isEqualTo(1)
+        }
+    }
+
+    @Test
+    fun `done returns to the previous keyboard after inserting when enabled`() = runTest {
+        val engine = PreviewEngine()
+        withKeyboard(engine, configure = { it.setReturnToPreviousKeyboard(true) }) { model, field, sources ->
+            var textAtReturn: String? = null
+            model.onReturnToPreviousKeyboard = { textAtReturn = field.fieldText }
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            sources.remove().frames.add(ShortArray(480) { 1000 })
+            awaitCondition { model.uiState.value is KeyboardUiState.Processing }
+            model.onDone()
+            engine.release.countDown()
+            awaitCondition { textAtReturn != null }
+            assertThat(textAtReturn).isEqualTo("UI works.")
+        }
+    }
+
+    @Test
+    fun `discard drops the dictation without inserting or copying it`() = runTest {
+        val engine = PreviewEngine()
+        withKeyboard(engine) { model, field, sources ->
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            sources.remove().frames.add(ShortArray(480) { 1000 })
+            awaitCondition { model.uiState.value is KeyboardUiState.Processing }
+            model.onDiscard()
+            assertThat(model.uiState.value).isEqualTo(KeyboardUiState.Idle)
+            assertThat(model.isRecording.value).isFalse()
             engine.release.countDown()
             awaitCondition { engine.closed.count == 0L }
             runCurrent()
             assertThat(field.commitCalls).isEmpty()
-            assertThat(model.uiState.value).isEqualTo(KeyboardUiState.Idle)
+            assertThat(rescue.saved).isEmpty()
+        }
+    }
+
+    @Test
+    fun `a destroyed keyboard still finishes the dictation and copies it`() = runTest {
+        val engine = PreviewEngine()
+        withKeyboard(engine) { model, field, sources ->
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            sources.remove().frames.add(ShortArray(480) { 1000 })
+            awaitCondition { model.uiState.value is KeyboardUiState.Processing }
+            store.clear()
+            awaitCondition { engine.finishing.count == 0L }
+            engine.release.countDown()
+            awaitCondition { rescue.saved.isNotEmpty() }
+            assertThat(rescue.saved).containsExactly("UI works.")
+            assertThat(field.commitCalls).isEmpty()
+        }
+    }
+
+    @Test
+    fun `a destroyed keyboard reports speech it could not transcribe yet`() = runTest {
+        withKeyboard(FakeStreamingParakeet(emptyList()), EngineState.Loading) { model, _, sources ->
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            sources.remove().frames.add(ShortArray(480) { 1000 })
+            awaitCondition { model.uiState.value == KeyboardUiState.Listening(modelLoading = true) }
+            store.clear()
+            runCurrent()
+            assertThat(rescue.lost).isEqualTo(1)
+        }
+    }
+
+    @Test
+    fun `restarting input on the same field keeps the dictation for that field`() = runTest {
+        val engine = PreviewEngine()
+        withKeyboard(engine) { model, field, sources ->
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            sources.remove().frames.add(ShortArray(480) { 1000 })
+            awaitCondition { model.uiState.value is KeyboardUiState.Processing }
+            val restarted = FakeInputConnection()
+            model.setTextInjector(
+                TextInjector(restarted, EditorInfo().apply { inputType = InputType.TYPE_CLASS_TEXT }),
+                sameEditor = true,
+            )
+            assertThat(model.isRecording.value).isTrue()
+            model.onRecordStop()
+            engine.release.countDown()
+            awaitCondition { model.uiState.value == KeyboardUiState.Idle }
+            assertThat(restarted.fieldText).isEqualTo("UI works.")
+            assertThat(field.fieldText).isEmpty()
+        }
+    }
+
+    @Test
+    fun `listening is shown only once the microphone delivers audio`() = runTest {
+        withKeyboard(FakeStreamingParakeet(emptyList())) { model, _, sources ->
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            val source = sources.remove()
+            repeat(5) {
+                Thread.sleep(20)
+                runCurrent()
+            }
+            assertThat(model.uiState.value).isEqualTo(KeyboardUiState.MicStarting)
+            source.frames.add(ShortArray(480))
+            awaitCondition { model.uiState.value == KeyboardUiState.Listening(modelLoading = false) }
         }
     }
 
@@ -315,14 +540,34 @@ class KeyboardViewModelRecordingTest {
     }
 
     @Test
-    fun `hiding while model loads cancels automatic recording`() = runTest {
-        withKeyboard(FakeStreamingParakeet(emptyList()), EngineState.Loading, configure = {
+    fun `recording while the model loads is transcribed once it is ready`() = runTest {
+        withKeyboard(FakeStreamingParakeet(listOf(0 to "Hello", 8000 to "world.")), EngineState.Loading) { model, field, sources ->
+            assertThat(model.uiState.value).isEqualTo(KeyboardUiState.EngineLoading(KeyboardUiState.LoadingReason.EngineStarting))
+            model.onRecordStart()
+            awaitCondition { sources.isNotEmpty() }
+            val source = sources.remove()
+            repeat(100) { source.frames.add(ShortArray(480) { 1000 }) }
+            awaitCondition { source.frames.isEmpty() }
+            awaitCondition { model.uiState.value == KeyboardUiState.Listening(modelLoading = true) }
+            model.onRecordStop()
+            assertThat(model.uiState.value).isEqualTo(KeyboardUiState.Transcribing("", modelLoading = true))
+            assertThat(field.fieldText).isEmpty()
+            model.setEngineState(EngineState.Ready)
+            awaitCondition { model.uiState.value == KeyboardUiState.Idle }
+            assertThat(field.fieldText).isEqualTo("Hello world.")
+        }
+    }
+
+    // Automatic recording no longer waits for the model, only for the service binding.
+    @Test
+    fun `automatic recording starts while the model loads, but not before the engine connects`() = runTest {
+        withKeyboard(FakeStreamingParakeet(emptyList()), EngineState.Unloaded, configure = {
             it.setAutoStartRecording(true)
         }) { model, _, sources ->
             model.onKeyboardShown()
             runCurrent()
             model.onKeyboardHidden()
-            model.setEngineState(EngineState.Ready)
+            model.setEngineState(EngineState.Loading)
             runCurrent()
             assertThat(model.isRecording.value).isFalse()
             assertThat(sources).isEmpty()
@@ -415,8 +660,9 @@ class KeyboardViewModelRecordingTest {
             }
         }
         val suggestions = WordSuggestionProvider(context)
-        val model = KeyboardViewModel(AudioCaptureManager(context), preferences, suggestions)
-        val store = ViewModelStore().apply { put("keyboard", model) }
+        val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        val model = KeyboardViewModel(AudioCaptureManager(context), preferences, suggestions, rescue, sessionScope)
+        store = ViewModelStore().apply { put("keyboard", model) }
         val field = FakeInputConnection()
         model.setTextInjector(TextInjector(field, EditorInfo().apply { inputType = InputType.TYPE_CLASS_TEXT }))
         model.setInferenceRepository(InferenceRepository(engine))
@@ -426,6 +672,8 @@ class KeyboardViewModelRecordingTest {
             test(model, field, sources)
         } finally {
             store.clear()
+            runCurrent()
+            sessionScope.cancel()
             runCurrent()
             suggestions.close()
             ShadowAudioRecord.clearSource()
@@ -440,6 +688,13 @@ class KeyboardViewModelRecordingTest {
             Thread.sleep(5)
         }
         assertThat(condition()).isTrue()
+    }
+
+    private class RecordingRescue : DictationRescue {
+        val saved = mutableListOf<String>()
+        var lost = 0
+        override fun save(text: String) { saved += text }
+        override fun reportLost() { lost++ }
     }
 
     private class MicrophoneSource : ShadowAudioRecord.AudioRecordSource {

@@ -5,6 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import dev.brgr.outspoke.audio.AudioCaptureManager
+import dev.brgr.outspoke.audio.AudioChunk
+import dev.brgr.outspoke.ime.DictationRescue
 import dev.brgr.outspoke.ime.EnterAction
 import dev.brgr.outspoke.ime.TextInjector
 import dev.brgr.outspoke.ime.WordSuggestionProvider
@@ -16,21 +18,33 @@ import dev.brgr.outspoke.inference.TranscriptResult
 import dev.brgr.outspoke.settings.preferences.AppPreferences
 import dev.brgr.outspoke.ui.keyboard.components.WHISPER_LANGUAGE_OPTIONS
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val TAG = "KeyboardViewModel"
 
 /**
  * Bridges the IME lifecycle, audio capture, and inference pipeline into a stream of
  * [KeyboardUiState] values consumed by [KeyboardScreen].
+ *
+ * Dictated speech is never dropped silently: only [onDiscard] throws it away. Text that
+ * cannot reach the editor it was dictated for goes to [dictationRescue].
  */
 class KeyboardViewModel(
     private val audioCaptureManager: AudioCaptureManager,
     private val appPreferences: AppPreferences,
     private val wordSuggestionProvider: WordSuggestionProvider,
+    private val dictationRescue: DictationRescue,
+    /** Runs dictations. Outlives [viewModelScope] so a dictation can finish after the IME is gone. */
+    private val sessionScope: CoroutineScope,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<KeyboardUiState>(
@@ -121,7 +135,7 @@ class KeyboardViewModel(
 
     /** Streaming results have already been cleaned and custom spellings must stay intact. */
     val transcriptAlreadyCleaned: Boolean
-        get() = inferenceRepository?.producesCleanTranscripts == true
+        get() = _repository.value?.producesCleanTranscripts == true
 
     /**
      * Pipeline diagnostic counters for the current or most recent recording session.
@@ -228,12 +242,7 @@ class KeyboardViewModel(
      * Returns true when the keyboard is actively recording or processing a transcription.
      * The suggestion bar must not be shown in these states.
      */
-    private fun isActiveSession(): Boolean {
-        val s = _uiState.value
-        return s is KeyboardUiState.Listening ||
-                s is KeyboardUiState.Processing ||
-                s is KeyboardUiState.Transcribing
-    }
+    private fun isActiveSession(): Boolean = _uiState.value.isDictating
 
     /**
      * Clears word suggestions so the bar vanishes, without setting a persistent dismissed
@@ -271,7 +280,7 @@ class KeyboardViewModel(
      * Safe to call at any time - the engine's [setLanguage] is thread-safe.
      */
     fun setWhisperLanguage(tag: String) {
-        inferenceRepository?.setLanguage(tag)
+        _repository.value?.setLanguage(tag)
         viewModelScope.launch { appPreferences.setWhisperLanguage(tag) }
     }
 
@@ -294,7 +303,12 @@ class KeyboardViewModel(
     /** Called by [OutspokeInputMethodService] whenever [InferenceService.engineState] changes. */
     fun setEngineState(state: EngineState) {
         _engineState.value = state
-        if (captureJob?.isActive == true) return
+        // A dictation waits for the model itself and owns the status line until it ends.
+        if (session != null) return
+        showEngineState(state)
+    }
+
+    private fun showEngineState(state: EngineState) {
         when (state) {
             EngineState.Unloaded -> _uiState.value = KeyboardUiState.EngineLoading(
                 KeyboardUiState.LoadingReason.ModelNotDownloaded
@@ -321,11 +335,11 @@ class KeyboardViewModel(
         }
     }
 
-    private var inferenceRepository: InferenceRepository? = null
+    private val _repository = MutableStateFlow<InferenceRepository?>(null)
 
     /** Set by [OutspokeInputMethodService] when the service binding is established. */
     fun setInferenceRepository(repo: InferenceRepository?) {
-        inferenceRepository = repo
+        _repository.value = repo
         // Apply the persisted language tag immediately.
         repo?.setLanguage(whisperLanguage.value)
         // Constrain auto-detection to only the languages shown in the selector.
@@ -346,9 +360,21 @@ class KeyboardViewModel(
      */
     val enterAction: StateFlow<EnterAction> = _enterAction.asStateFlow()
 
-    fun setTextInjector(injector: TextInjector?) {
-        RecordingTrace.log { "editor attached=${injector != null} recording=${_isRecording.value}" }
-        if (textInjector !== injector && captureJob?.isActive == true) onInputFinished()
+    /**
+     * Attaches the editor of a new input session. A dictation in progress follows the
+     * editor only when [sameEditor] says the app restarted input on the same field;
+     * any other change detaches it so its text can never land in a different field.
+     */
+    fun setTextInjector(injector: TextInjector?, sameEditor: Boolean = false) {
+        RecordingTrace.log { "editor attached=${injector != null} sameEditor=$sameEditor dictation=${session?.id}" }
+        val s = session
+        if (s != null && injector !== s.injector) {
+            if (sameEditor && injector != null) {
+                s.injector = injector
+            } else {
+                detach(s, if (injector == null) "editor closed" else "editor changed")
+            }
+        }
         textInjector = injector
         _enterAction.value = injector?.enterAction ?: EnterAction.DONE
     }
@@ -383,12 +409,9 @@ class KeyboardViewModel(
      * error and give me back the idle button; the user then chooses how to record.
      */
     fun onRetry() {
-        // Cancel any lingering capture / inference from the failed session so it cannot
-        // bleed into the next one, then return to Idle.
-        captureJob?.cancel()
-        captureJob = null
-        recordingTranscript = null
-        audioCaptureManager.stopCapture()
+        // A failed dictation may still be draining its flow. Its preview was already
+        // rescued when it failed, so it cannot bleed into the next one.
+        session?.let { onDiscard() }
         _isRecording.value = false
         _isContinuousMode.value = false
         _uiState.value = KeyboardUiState.Idle
@@ -426,13 +449,40 @@ class KeyboardViewModel(
      * Perform the context-aware Enter action for the currently focused editor.
      * Inserts a newline for multi-line fields; otherwise triggers the editor's IME action
      * (search, send, go, done, next) via [InputConnection.performEditorAction].
+     * During a dictation Enter means [onSend]: finish, insert, then send.
      */
     fun performEnterAction() {
-        textInjector?.performEnterAction()
+        if (session != null) onSend() else textInjector?.performEnterAction()
     }
 
-    private var captureJob: Job? = null
-    private var recordingTranscript: RecordingTranscript? = null
+    /**
+     * One dictation, from the record request until its text is inserted, rescued or
+     * discarded. Owned by [sessionScope], so it can finish after the keyboard is gone.
+     */
+    private class Session(val id: Long, var injector: TextInjector?) {
+        val transcript = RecordingTranscript()
+
+        /** Captured audio, buffered until the speech model is ready to consume it. */
+        val audio = Channel<AudioChunk>(Channel.UNLIMITED)
+
+        /** Set on the capture thread when the microphone first delivers samples. */
+        val audioStarted = AtomicBoolean(false)
+        var job: Job? = null
+        var recording = true
+        var micLive = false
+        var modelReady = false
+        var failed = false
+
+        /** The input session ended; the text goes to [DictationRescue], never to a later editor. */
+        var orphaned = false
+        var send = false
+        var returnWhenDone = false
+        var switchKeyboard: (() -> Unit)? = null
+    }
+
+    /** The dictation shown by the keyboard. Detached dictations finish in [sessions] only. */
+    private var session: Session? = null
+    private val sessions = mutableListOf<Session>()
     private var noSpeechJob: Job? = null
     private var keyboardVisible = false
     private var autoStartJob: Job? = null
@@ -448,12 +498,13 @@ class KeyboardViewModel(
         returnKeyboardJob?.cancel()
         autoStartJob = viewModelScope.launch {
             if (!appPreferences.autoStartRecording.first()) return@launch
-            _engineState.first { it == EngineState.Ready }
+            // Recording starts while the model loads; its audio is buffered until it is ready.
+            _engineState.first { it == EngineState.Loading || it == EngineState.Ready }
             // A quick reopen can arrive while the previous recording is finalizing.
-            captureJob?.join()
+            session?.job?.join()
             val holdToRecord = appPreferences.triggerMode.first() == "HOLD"
             autoStartJob = null
-            if (!keyboardVisible || captureJob?.isActive == true) return@launch
+            if (!keyboardVisible || session != null) return@launch
             onRecordStart()
             // Automatic capture has no held gesture. Allow tap-to-stop in HOLD mode too.
             if (_isRecording.value && holdToRecord) onContinuousModeEnabled()
@@ -465,11 +516,11 @@ class KeyboardViewModel(
         if (!keyboardVisible) return
         keyboardVisible = false
         autoStartJob?.cancel()
-        val finishingCapture = captureJob
+        val finishing = session
         onRecordStop()
         returnKeyboardJob = viewModelScope.launch {
             if (!appPreferences.returnToPreviousKeyboard.first()) return@launch
-            finishingCapture?.join()
+            finishing?.job?.join()
             if (!keyboardVisible) onReturnToPreviousKeyboard?.invoke()
         }
     }
@@ -482,98 +533,66 @@ class KeyboardViewModel(
      * repository binding.
      *
      * Invoked from [onRecordStart] when the engine reports [EngineState.Ready] but no
-     * [InferenceRepository] is currently bound — a binder desync that would otherwise let
-     * the mic open with no transcription. The callback lets the IME react (rebind / reload)
-     * instead of the VM silently doing nothing.
+     * [InferenceRepository] is currently bound — a binder desync. The recording still
+     * starts and waits for the repository, so the callback lets the IME rebind / reload.
      */
     var onMissingRepo: (() -> Unit)? = null
 
     /**
-     * Start microphone capture and pipe audio through the inference engine.
-     * Ignored if the engine is not yet [EngineState.Ready] or if no
-     * [InferenceRepository] is currently bound (a binder desync).
+     * Start microphone capture immediately and transcribe the audio once the speech model
+     * is ready. Ignored while another dictation is in progress, and when there is no
+     * model to load ([EngineState.Unloaded] or [EngineState.Error]).
      */
     fun onRecordStart() {
-        RecordingTrace.log { "record requested ready=${_engineState.value == EngineState.Ready} previousActive=${captureJob?.isActive} injector=${textInjector != null}" }
+        RecordingTrace.log { "record requested engine=${_engineState.value.javaClass.simpleName} repo=${_repository.value != null} active=${session?.id} injector=${textInjector != null}" }
         autoStartJob?.cancel()
-        if (_engineState.value !is EngineState.Ready) {
-            Log.w(TAG, "onRecordStart() ignored - engine not ready (${_engineState.value})")
+        if (session != null) {
+            Log.w(TAG, "onRecordStart() ignored - a dictation is already in progress")
             return
         }
-
-        // EngineState.Ready without a bound InferenceRepository means the UI shows
-        // a ready talk button but transcription would silently no-op (the old code fell
-        // into a "capture audio without transcription" branch). Surface the desync as a
-        // loading state and ask the IME to reload/rebind instead of opening the mic.
-        if (inferenceRepository == null) {
-            Log.w(
-                TAG,
-                "onRecordStart() ignored - engine Ready but no InferenceRepository bound (desync); requesting reload"
-            )
-            _uiState.value = KeyboardUiState.EngineLoading(
-                KeyboardUiState.LoadingReason.EngineStarting
-            )
+        val engine = _engineState.value
+        if (engine == EngineState.Unloaded || engine is EngineState.Error) {
+            Log.w(TAG, "onRecordStart() ignored - no speech model to load ($engine)")
+            return
+        }
+        if (engine == EngineState.Ready && _repository.value == null) {
+            Log.w(TAG, "Engine Ready but no InferenceRepository bound (desync); requesting reload")
             onMissingRepo?.invoke()
-            return
         }
 
-        captureJob?.cancel()
         noSpeechJob?.cancel()
+        val s = Session(RecordingTrace.nextSessionId(), textInjector)
+        session = s
+        sessions += s
         _isRecording.value = true
-        _uiState.value = KeyboardUiState.Listening
         _diagnostics.value = PipelineDiagnostics()
         _wordSuggestions.value = emptyList()
         // Dismissed flag is no longer set persistently — bar reappears on next word tap.
+        publish(s)
+        s.job = sessionScope.launch { runSession(s) }
+    }
 
-        val transcript = RecordingTranscript()
-        recordingTranscript = transcript
-        val sessionInjector = textInjector
-        captureJob = viewModelScope.launch {
-            // Capture this coroutine's Job reference so the collect lambda can detect
-            // whether it belongs to the currently active session.  If onRecordStart() is
-            // called again (e.g. from onFieldCleared after a "Send"), captureJob is
-            // replaced with the new job; any collect callbacks still queued from the OLD
-            // job see captureJob != myJob and return immediately - preventing stale
-            // partial results from bleeding into the fresh TextInjector state.
-            val myJob = coroutineContext[Job]
-            val traceSession = RecordingTrace.nextSessionId()
-            var results = 0
-            RecordingTrace.log { "session start id=$traceSession" }
-            var inserted = false
-            var failed = false
-            val addTrailingSpace = trailingSpace.value
+    private class EngineUnavailable(message: String) : Exception(message)
 
-            try {
-                if (!_isRecording.value) {
-                    _uiState.value = KeyboardUiState.Idle
-                    return@launch
-                }
-                // Repo was verified non-null above; re-read defensively in case the binder
-                // detached between the guard and this launch. If it did become null, abort
-                // cleanly rather than capturing audio with nowhere to send it.
-                val repo = inferenceRepository
-                if (repo == null) {
-                    Log.w(TAG, "InferenceRepository detached before capture started - aborting session")
-                    _isContinuousMode.value = false
-                    _uiState.value = KeyboardUiState.EngineLoading(
-                        KeyboardUiState.LoadingReason.EngineStarting
-                    )
-                    onMissingRepo?.invoke()
-                    return@launch
-                }
-
-                // Pipe audio through the inference engine on Dispatchers.Default.
+    private suspend fun runSession(s: Session) {
+        var results = 0
+        var inserted = false
+        val addTrailingSpace = trailingSpace.value
+        RecordingTrace.log { "session start id=${s.id}" }
+        try {
+            coroutineScope {
+                launch { captureAudio(s) }
+                val repo = awaitRepository(s)
+                s.modelReady = true
+                publish(s)
+                RecordingTrace.log { "session model ready id=${s.id} recording=${s.recording}" }
                 // Results update the preview; completion performs the editor insertion.
                 repo.transcribe(
-                    audio = audioCaptureManager.startCapture(
-                        vadEnabled = vadSensitivity.value,
-                        rawSource = rawMicCapture.value,
-                        recordingId = traceSession,
-                    ),
+                    audio = s.audio.consumeAsFlow(),
                     postprocessingEnabled = postprocessingEnabled.value,
                     formatNumbersAsDigits = formatNumbersAsDigits.value,
                     customWords = customWords.value,
-                    recordingId = traceSession,
+                    recordingId = s.id,
                 ).collect { result ->
                     results++
                     RecordingTrace.log {
@@ -582,128 +601,243 @@ class KeyboardViewModel(
                             is TranscriptResult.Final -> result.text.length
                             else -> 0
                         }
-                        "result session=$traceSession count=$results type=${result.javaClass.simpleName} chars=$chars current=${captureJob == myJob} injector=${textInjector != null}"
+                        "result session=${s.id} count=$results type=${result.javaClass.simpleName} chars=$chars current=${session === s} orphaned=${s.orphaned}"
                     }
-                    // Stale-session guard: if this job has been superseded (e.g. the field
-                    // was cleared and a new session started), discard this result entirely
-                    // so no old-session text is injected into the fresh TextInjector.
-                    if (captureJob != myJob || failed) return@collect
-
-                    when (result) {
-                        is TranscriptResult.Partial -> {
-                            transcript.partial(result.text)
-                            _uiState.value = if (_isRecording.value) KeyboardUiState.Processing(transcript.text)
-                                else KeyboardUiState.Transcribing(transcript.text)
-                        }
-
-                        is TranscriptResult.Final -> {
-                            transcript.final(result.text)
-                            _uiState.value = if (_isRecording.value) KeyboardUiState.Processing(transcript.text)
-                                else KeyboardUiState.Transcribing(transcript.text)
-                        }
-
-                        is TranscriptResult.Failure -> {
-                            failed = true
-                            _isRecording.value = false
-                            audioCaptureManager.stopCapture()
-                            Log.e(TAG, "Transcription failure", result.cause)
-                            _isContinuousMode.value = false
-                            _uiState.value = KeyboardUiState.Error(
-                                reason = KeyboardUiState.ErrorReason.TranscriptionFailed,
-                                detail = result.cause.message,
-                                partial = transcript.text,
-                            )
-                        }
-
-                        is TranscriptResult.WindowTrimmed -> {
-                            transcript.windowTrimmed()
-                            _diagnostics.value = _diagnostics.value.copy(
-                                windowTrims = _diagnostics.value.windowTrims + 1
-                            )
-                        }
-
-                        // The model saw audio but couldn't resolve a word (weak
-                        // high-frequency fricatives). Surface a brief "didn't catch that"
-                        // cue, then return to the listening/idle state so the user can
-                        // retry without tapping to clear it.
-                        is TranscriptResult.NoSpeech -> {
-                            if (transcript.hasFinalText) return@collect
-                            Log.d(TAG, "NoSpeech — surfacing 'didn't catch that'")
-                            if (_isRecording.value) {
-                                _uiState.value = if (transcript.text.isEmpty()) KeyboardUiState.Listening
-                                    else KeyboardUiState.Processing(transcript.text)
-                                return@collect
-                            }
-                            showNoSpeech()
-                        }
-                    }
-                }
-
-                if (captureJob != myJob || sessionInjector !== textInjector) return@launch
-                if (transcript.hasFinalText && !failed) {
-                    val insertionStart = System.nanoTime()
-                    inserted = sessionInjector?.insertTranscript(transcript.finalText, addTrailingSpace) == true
-                    RecordingTrace.log {
-                        "insertion session=$traceSession durationMs=${(System.nanoTime() - insertionStart) / 1_000_000} accepted=$inserted"
-                    }
-                    if (!inserted) {
-                        failed = true
-                        _uiState.value = KeyboardUiState.Error(
-                            reason = KeyboardUiState.ErrorReason.TextInsertionFailed,
-                            partial = transcript.text,
-                        )
-                    }
-                }
-                // VAD can filter an entire recording, and a long decode can return
-                // blank without emitting NoSpeech. Both still need visible feedback.
-                if (!transcript.hasFinalText && !failed) showNoSpeech()
-                // Completion, including an empty final utterance, releases the recording UI.
-                if (_uiState.value is KeyboardUiState.Transcribing ||
-                    _uiState.value == KeyboardUiState.Listening ||
-                    _uiState.value is KeyboardUiState.Processing
-                ) {
-                    Log.d(TAG, "Transcription flow completed - resetting to Idle")
-                    _isContinuousMode.value = false
-                    _uiState.value = KeyboardUiState.Idle
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: SecurityException) {
-                Log.e(TAG, "Microphone permission denied", e)
-                _isContinuousMode.value = false
-                _uiState.value = KeyboardUiState.Error(
-                    reason = KeyboardUiState.ErrorReason.MicPermissionDenied,
-                    partial = transcript.text,
-                )
-            } catch (e: IllegalStateException) {
-                Log.e(TAG, "AudioRecord failed to initialise", e)
-                _isContinuousMode.value = false
-                _uiState.value = KeyboardUiState.Error(
-                    reason = KeyboardUiState.ErrorReason.MicInitFailed,
-                    detail = e.message,
-                    partial = transcript.text,
-                )
-            } catch (e: Exception) {
-                Log.e(TAG, "Unexpected audio capture error", e)
-                _isContinuousMode.value = false
-                _uiState.value = KeyboardUiState.Error(
-                    reason = KeyboardUiState.ErrorReason.AudioCaptureFailed,
-                    detail = e.message,
-                    partial = transcript.text,
-                )
-            } finally {
-                RecordingTrace.log { "session end id=$traceSession results=$results inserted=$inserted failed=$failed current=${captureJob == myJob}" }
-                if (captureJob == myJob) {
-                    audioCaptureManager.stopCapture()
-                    _isRecording.value = false
-                    _isContinuousMode.value = false
-                    captureJob = null
-                    recordingTranscript = null
-                    setEngineState(_engineState.value)
-                    updateWordAtCursor()
+                    onResult(s, result)
                 }
             }
+            inserted = complete(s, addTrailingSpace)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: EngineUnavailable) {
+            Log.e(TAG, "Speech model unavailable for dictation", e)
+            fail(s, KeyboardUiState.ErrorReason.EngineLoadFailed, e.message)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Microphone permission denied", e)
+            fail(s, KeyboardUiState.ErrorReason.MicPermissionDenied)
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "AudioRecord failed to initialise", e)
+            fail(s, KeyboardUiState.ErrorReason.MicInitFailed, e.message)
+        } catch (e: Exception) {
+            Log.e(TAG, "Unexpected audio capture error", e)
+            fail(s, KeyboardUiState.ErrorReason.AudioCaptureFailed, e.message)
+        } finally {
+            RecordingTrace.log { "session end id=${s.id} results=$results inserted=$inserted failed=${s.failed} orphaned=${s.orphaned} current=${session === s}" }
+            release(s)
         }
+        // Not reached when discarded. The keyboard is already free for a new dictation.
+        leave(s, inserted)
+    }
+
+    /** Feeds the microphone into [Session.audio] until Stop, or until the microphone fails. */
+    private suspend fun captureAudio(s: Session) {
+        // A Stop that arrives before this runs has no capture flag to set yet.
+        if (!s.recording) {
+            s.audio.close()
+            return
+        }
+        try {
+            audioCaptureManager.startCapture(
+                vadEnabled = vadSensitivity.value,
+                rawSource = rawMicCapture.value,
+                recordingId = s.id,
+                onAudioStarted = {
+                    s.audioStarted.set(true)
+                    sessionScope.launch {
+                        s.micLive = true
+                        publish(s)
+                    }
+                },
+            ).collect { s.audio.send(it) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Without any audio there is nothing to finish: report the failure. A later
+            // failure ends the recording but keeps transcribing what was captured.
+            if (!s.audioStarted.get()) throw e
+            Log.e(TAG, "Audio capture failed mid-recording; finishing with the captured audio", e)
+        } finally {
+            s.audio.close()
+        }
+        stop(s)
+    }
+
+    private suspend fun awaitRepository(s: Session): InferenceRepository {
+        if (_engineState.value != EngineState.Ready || _repository.value == null) {
+            RecordingTrace.log { "session waiting for model id=${s.id} engine=${_engineState.value.javaClass.simpleName}" }
+        }
+        val (repo, engine) = combine(_repository, _engineState) { repo, engine -> repo to engine }
+            .first { (repo, engine) ->
+                (repo != null && engine == EngineState.Ready) ||
+                        engine is EngineState.Error || engine == EngineState.Unloaded
+            }
+        if (repo != null && engine == EngineState.Ready) return repo
+        throw EngineUnavailable((engine as? EngineState.Error)?.message ?: "Speech model is not available")
+    }
+
+    private fun onResult(s: Session, result: TranscriptResult) {
+        if (s.failed) return
+        when (result) {
+            is TranscriptResult.Partial -> {
+                s.transcript.partial(result.text)
+                publish(s)
+            }
+
+            is TranscriptResult.Final -> {
+                s.transcript.final(result.text)
+                publish(s)
+            }
+
+            is TranscriptResult.Failure -> {
+                Log.e(TAG, "Transcription failure", result.cause)
+                fail(s, KeyboardUiState.ErrorReason.TranscriptionFailed, result.cause.message)
+            }
+
+            is TranscriptResult.WindowTrimmed -> {
+                s.transcript.windowTrimmed()
+                if (session === s) {
+                    _diagnostics.value = _diagnostics.value.copy(
+                        windowTrims = _diagnostics.value.windowTrims + 1
+                    )
+                }
+            }
+
+            // The model saw audio but couldn't resolve a word (weak
+            // high-frequency fricatives). Surface a brief "didn't catch that"
+            // cue, then return to the listening/idle state so the user can
+            // retry without tapping to clear it.
+            is TranscriptResult.NoSpeech -> {
+                if (s.transcript.hasFinalText) return
+                Log.d(TAG, "NoSpeech — surfacing 'didn't catch that'")
+                if (s.recording) publish(s) else if (session === s) showNoSpeech()
+            }
+        }
+    }
+
+    /** Shows [s] in the status line while it is the keyboard's dictation. */
+    private fun publish(s: Session) {
+        if (session !== s || s.failed) return
+        val text = s.transcript.text
+        _uiState.value = when {
+            !s.recording -> KeyboardUiState.Transcribing(text, modelLoading = !s.modelReady)
+            text.isNotEmpty() -> KeyboardUiState.Processing(text)
+            !s.micLive -> KeyboardUiState.MicStarting
+            else -> KeyboardUiState.Listening(modelLoading = !s.modelReady)
+        }
+    }
+
+    /**
+     * Ends a dictation whose transcription completed: insert it, and send if requested.
+     * Returns whether the text reached its editor.
+     */
+    private fun complete(s: Session, addTrailingSpace: Boolean): Boolean {
+        if (s.failed) return false
+        val foreground = session === s
+        if (!s.transcript.hasFinalText) {
+            // VAD can filter an entire recording, and a long decode can return
+            // blank without emitting NoSpeech. Both still need visible feedback.
+            if (foreground) showNoSpeech()
+            return false
+        }
+        val text = s.transcript.finalText
+        val editor = s.injector.takeUnless { s.orphaned }
+        val insertionStart = System.nanoTime()
+        val inserted = editor?.insertTranscript(text, addTrailingSpace) == true
+        RecordingTrace.log {
+            "insertion session=${s.id} durationMs=${(System.nanoTime() - insertionStart) / 1_000_000} accepted=$inserted orphaned=${s.orphaned}"
+        }
+        if (editor == null || !inserted) {
+            dictationRescue.save(text)
+            if (foreground) {
+                _isContinuousMode.value = false
+                _uiState.value = KeyboardUiState.Error(
+                    reason = KeyboardUiState.ErrorReason.TextInsertionFailed,
+                    partial = text,
+                )
+            }
+            return false
+        }
+        if (s.send) editor.send()
+        if (foreground) {
+            Log.d(TAG, "Transcription flow completed - resetting to Idle")
+            _isContinuousMode.value = false
+            _uiState.value = KeyboardUiState.Idle
+        }
+        return true
+    }
+
+    /**
+     * Runs the keyboard change the user asked for when finishing [s]: the switch key
+     * always switches (any unsaved text was rescued); Done and Send return to the
+     * previous keyboard after a successful insertion when that preference is on.
+     */
+    private suspend fun leave(s: Session, finished: Boolean) {
+        if (s.orphaned) return
+        val switch = s.switchKeyboard
+        when {
+            switch != null -> switch()
+            finished && s.returnWhenDone && appPreferences.returnToPreviousKeyboard.first() ->
+                onReturnToPreviousKeyboard?.invoke()
+        }
+    }
+
+    private fun fail(s: Session, reason: KeyboardUiState.ErrorReason, detail: String? = null) {
+        s.failed = true
+        stop(s)
+        val preview = s.transcript.text
+        if (preview.isNotBlank()) {
+            dictationRescue.save(preview)
+        } else if (session !== s && s.audioStarted.get()) {
+            dictationRescue.reportLost()
+        }
+        if (session === s) {
+            _isContinuousMode.value = false
+            _uiState.value = KeyboardUiState.Error(reason = reason, detail = detail, partial = preview)
+        }
+    }
+
+    /** Ends capture for [s]; its buffered audio is still transcribed. */
+    private fun stop(s: Session) {
+        if (!s.recording) return
+        s.recording = false
+        audioCaptureManager.stopCapture(s.id)
+        RecordingTrace.log { "session stop id=${s.id} current=${session === s}" }
+        if (session === s) {
+            _isRecording.value = false
+            _isContinuousMode.value = false
+            publish(s)
+        }
+    }
+
+    /**
+     * The editor of [s] is gone. The dictation keeps finishing in the background and its
+     * text is rescued instead of inserted; the keyboard is free for a new dictation.
+     */
+    private fun detach(s: Session, reason: String) {
+        RecordingTrace.log { "session detached id=${s.id} reason=$reason recording=${s.recording} modelReady=${s.modelReady}" }
+        stop(s)
+        s.orphaned = true
+        s.injector = null
+        if (session === s) {
+            session = null
+            _isRecording.value = false
+            _isContinuousMode.value = false
+            _uiState.value = KeyboardUiState.Idle
+            showEngineState(_engineState.value)
+        }
+    }
+
+    private fun release(s: Session) {
+        audioCaptureManager.stopCapture(s.id)
+        s.audio.cancel()
+        sessions -= s
+        if (session !== s) return
+        session = null
+        _isRecording.value = false
+        _isContinuousMode.value = false
+        if (_uiState.value.isDictating) _uiState.value = KeyboardUiState.Idle
+        if (_uiState.value == KeyboardUiState.Idle) showEngineState(_engineState.value)
+        updateWordAtCursor()
     }
 
     private fun showNoSpeech() {
@@ -717,82 +851,118 @@ class KeyboardViewModel(
         }
     }
 
+    /**
+     * Stop the microphone. The repository finishes collecting the buffered audio and runs
+     * its definitive final pass; successful completion inserts the finalized text. The
+     * dictation is intentionally not cancelled: slow engines like Whisper can take 10-20 s
+     * to produce the Final result after audio ends.
+     */
     fun onRecordStop() {
-        RecordingTrace.log { "record stop active=${captureJob?.isActive} recording=${_isRecording.value}" }
+        RecordingTrace.log { "record stop active=${session?.id} recording=${_isRecording.value}" }
         autoStartJob?.cancel()
-        _isRecording.value = false
         // Always reset continuous mode when recording stops from any code path.
         _isContinuousMode.value = false
-
-        // Stop the microphone - this terminates the upstream audio flow, which causes
-        // InferenceRepository to finish collecting audio and run its definitive final
-        // inference pass.  We intentionally do NOT cancel captureJob here: slow engines
-        // like Whisper can take 10-20 s to produce the Final result after audio ends,
-        // and cancelling the job would discard the recording. Successful flow
-        // completion inserts the finalized text and releases the job.
-        audioCaptureManager.stopCapture()
-
-        // Switch to Transcribing so the UI clearly signals "mic off, engine still working".
-        // The collect loop in onRecordStart() will transition back to Idle (and commit
-        // the text) once the recording flow completes.
-        if (_uiState.value is KeyboardUiState.Listening ||
-            _uiState.value is KeyboardUiState.Processing
-        ) {
-            _uiState.value = KeyboardUiState.Transcribing(recordingTranscript?.text.orEmpty())
+        val s = session
+        if (s == null) {
+            _isRecording.value = false
+            return
         }
+        stop(s)
+    }
+
+    /** Done: finish and insert, then return to the previous keyboard if the user enabled that. */
+    fun onDone() {
+        val s = session ?: return
+        RecordingTrace.log { "done requested id=${s.id}" }
+        s.returnWhenDone = true
+        stop(s)
+    }
+
+    /** Send: like [onDone], and submits the editor (e.g. sends the message) after inserting. */
+    fun onSend() {
+        val s = session ?: return
+        RecordingTrace.log { "send requested id=${s.id}" }
+        s.send = true
+        s.returnWhenDone = true
+        stop(s)
+    }
+
+    /** Switch key: a dictation in progress is finished and inserted before [switch] runs. */
+    fun onSwitchKeyboard(switch: () -> Unit) {
+        val s = session
+        if (s == null) {
+            switch()
+            return
+        }
+        RecordingTrace.log { "switch requested id=${s.id}" }
+        s.switchKeyboard = switch
+        stop(s)
+    }
+
+    /** Explicit user action: drops the dictation without inserting or copying it. */
+    fun onDiscard() {
+        val s = session ?: return
+        RecordingTrace.log { "session discarded id=${s.id}" }
+        stop(s)
+        s.job?.cancel()
+        release(s)
     }
 
     /**
-     * Called when the focused text field is cleared externally - typically because the user
-     * pressed "Send" in a messaging app and the app cleared the [EditText] content.
-     *
-     * Discards pending text. Active dictation resumes as a fresh recording;
-     * a stopped recording is cancelled so it cannot fill the cleared field later.
+     * Called when the focused text field is cleared externally - by backspace or the
+     * delete key, or because the app cleared it after "Send". A dictation in progress
+     * keeps recording and inserts into the same field when it completes.
      */
     fun onFieldCleared() {
-        RecordingTrace.log { "field cleared recording=${_isRecording.value}" }
-        val resumeRecording = _isRecording.value
-        val continuous = _isContinuousMode.value
-        onInputFinished()
+        RecordingTrace.log { "field cleared dictation=${session?.id} recording=${_isRecording.value}" }
         _wordSuggestions.value = emptyList()
         _wordAtCursor.value = null
-        if (resumeRecording) {
-            onRecordStart()
-            _isContinuousMode.value = continuous
-        }
     }
 
-    /** Discards unfinished speech when its input session is no longer valid. */
+    /**
+     * The input session ended (field or app change, IME switched away). A dictation in
+     * progress stops recording, finishes transcribing and is rescued instead of inserted.
+     */
     fun onInputFinished() {
-        RecordingTrace.log { "input finished active=${captureJob?.isActive} recording=${_isRecording.value}" }
+        RecordingTrace.log { "input finished dictation=${session?.id} recording=${_isRecording.value}" }
         autoStartJob?.cancel()
         returnKeyboardJob?.cancel()
-        audioCaptureManager.stopCapture()
-        captureJob?.cancel()
-        captureJob = null
-        recordingTranscript = null
-        _isRecording.value = false
-        _isContinuousMode.value = false
-        _uiState.value = KeyboardUiState.Idle
+        session?.let { detach(it, "input finished") }
+        val ui = _uiState.value
+        if (ui is KeyboardUiState.NoSpeech ||
+            (ui is KeyboardUiState.Error && ui.reason != KeyboardUiState.ErrorReason.EngineLoadFailed)
+        ) {
+            _uiState.value = KeyboardUiState.Idle
+        }
     }
 
     override fun onCleared() {
         super.onCleared()
-        captureJob?.cancel()
-        audioCaptureManager.stopCapture()
+        for (s in sessions.toList()) {
+            if (!s.orphaned) detach(s, "keyboard destroyed")
+            // The repository binding dies with the keyboard: audio still waiting for the
+            // model can never be transcribed. Ready dictations keep their repository.
+            if (!s.modelReady) {
+                s.job?.cancel()
+                if (s.audioStarted.get()) dictationRescue.reportLost()
+            }
+        }
         _isRecording.value = false
         _isContinuousMode.value = false
         textInjector = null
-        inferenceRepository = null
+        _repository.value = null
     }
 
     class Factory(
         private val audioCaptureManager: AudioCaptureManager,
         private val appPreferences: AppPreferences,
         private val wordSuggestionProvider: WordSuggestionProvider,
+        private val dictationRescue: DictationRescue,
+        /** Outlives the keyboard so an unfinished dictation completes after the IME is destroyed. */
+        private val sessionScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            KeyboardViewModel(audioCaptureManager, appPreferences, wordSuggestionProvider) as T
+            KeyboardViewModel(audioCaptureManager, appPreferences, wordSuggestionProvider, dictationRescue, sessionScope) as T
     }
 }

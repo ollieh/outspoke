@@ -25,6 +25,7 @@ import dev.brgr.outspoke.BuildConfig
 import dev.brgr.outspoke.audio.PermissionHelper
 import dev.brgr.outspoke.inference.EngineState
 import dev.brgr.outspoke.inference.InferenceService
+import dev.brgr.outspoke.inference.RecordingTrace
 import dev.brgr.outspoke.inference.cleanTranscript
 import dev.brgr.outspoke.settings.preferences.AppPreferences
 import dev.brgr.outspoke.ui.keyboard.ImeComposeView
@@ -122,10 +123,12 @@ class OutspokeInputMethodService :
             keyboardViewModel.setInferenceRepository(b.getRepository())
 
             Log.d(TAG, "InferenceService connected - engine state: ${b.getEngineState().value}")
+            RecordingTrace.log { "ime service connected engine=${b.getEngineState().value.javaClass.simpleName}" }
         }
 
         override fun onServiceDisconnected(name: ComponentName) {
             Log.w(TAG, "InferenceService disconnected unexpectedly - attempting rebind")
+            RecordingTrace.log { "ime service disconnected - rebinding" }
             detachFromBinder()
             // Show "Loading…" rather than "Model not downloaded" - the model is still present;
             // the service was killed by the OS (e.g. OOM) and we are about to restart it.
@@ -143,6 +146,7 @@ class OutspokeInputMethodService :
         savedStateRegistryController.performRestore(null)
         super.onCreate()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
+        RecordingTrace.log { "ime create" }
 
         window?.window?.decorView?.let { decorView ->
             decorView.setViewTreeLifecycleOwner(this)
@@ -165,6 +169,7 @@ class OutspokeInputMethodService :
                 AudioCaptureManager(this),
                 AppPreferences(this),
                 wordSuggestionProvider,
+                ClipboardDictationRescue(this),
             ),
         )[KeyboardViewModel::class.java]
 
@@ -220,11 +225,13 @@ class OutspokeInputMethodService :
 
     override fun onWindowShown() {
         super.onWindowShown()
-        // Mark the already-bound foreground service as started so it survives IME recreation.
+        // Mark the already-bound foreground service as started so it survives IME recreation,
+        // including a switch to another keyboard (which destroys this service and unbinds).
         try {
             startService(inferenceServiceIntent())
         } catch (e: IllegalStateException) {
             Log.w(TAG, "Unable to retain inference service; keeping the existing binding", e)
+            RecordingTrace.log { "ime start inference service failed: ${e.javaClass.simpleName}" }
         }
         val targetHeight = keyboardHeightPx + (if (barVisible) barSlotHeightPx else 0)
         Log.d(
@@ -272,6 +279,7 @@ class OutspokeInputMethodService :
     }
 
     override fun onDestroy() {
+        RecordingTrace.log { "ime destroy bound=$isBound" }
         handler.removeCallbacks(shrinkWindowRunnable)
         detachFromBinder()
         if (isBound) {
@@ -481,6 +489,7 @@ class OutspokeInputMethodService :
                 OutspokeKeyboardTheme {
                     KeyboardScreen(
                         viewModel = keyboardViewModel,
+                        // Runs after a dictation in progress has been inserted.
                         onSwitchKeyboard = {
                             if (!switchToPreviousInputMethod()) {
                                 (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
@@ -549,6 +558,7 @@ class OutspokeInputMethodService :
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
         Log.d(TAG, "onStartInput restarting=$restarting")
+        RecordingTrace.log { "ime start input restarting=$restarting connection=${currentInputConnection != null}" }
         // Open the spell-checker session here as a fallback — on some devices onBindInput
         // fires after onStartInput, or not at all. open() is idempotent.
         wordSuggestionProvider.open()
@@ -567,7 +577,9 @@ class OutspokeInputMethodService :
                         skipSpuriousPeriods = true,
                     )
                 },
-            )
+            ),
+            // Restarting input keeps the same field, so a dictation in progress still belongs here.
+            sameEditor = restarting,
         )
         Log.d(TAG, "onStartInput - engine: ${inferenceBinder?.getEngineState()?.value}")
     }
@@ -582,8 +594,8 @@ class OutspokeInputMethodService :
      * Strategy: the update is only interesting when the cursor moves to (0, 0).  We then
      * do a cheap two-byte IPC read to confirm the field is genuinely empty (as opposed to
      * the user merely clicking at the very start of a non-empty field).  If it is empty we
-     * forward to [KeyboardViewModel.onFieldCleared], which discards pending recording
-     * text and, if recording is active, restarts capture with a fresh audio window.
+     * forward to [KeyboardViewModel.onFieldCleared]. A dictation in progress keeps
+     * recording and inserts into the cleared field when it completes.
      */
     override fun onUpdateSelection(
         oldSelStart: Int, oldSelEnd: Int,

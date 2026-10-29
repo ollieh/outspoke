@@ -11,7 +11,7 @@
     <string name="pref_custom_words_duplicate">This word is already saved.</string>
     <string name="pref_custom_words_limit">You can save up to 100 terms. Remove one to add another.</string>
     <string name="pref_auto_start_recording_title">Record when Outspoke opens</string>
-    <string name="pref_auto_start_recording_summary">Start listening as soon as the keyboard and speech model are ready. Tap the microphone to stop.</string>
+    <string name="pref_auto_start_recording_summary">Start listening as soon as the keyboard opens, even while the speech model is still loading. Tap the microphone to stop.</string>
     <string name="pref_return_keyboard_title">Return to previous keyboard</string>
     <string name="pref_return_keyboard_summary">When Outspoke closes, finish dictation and switch back to the keyboard you used before it.</string>
     <string name="app_name">Outspoke</string>
@@ -56,6 +56,11 @@
     <string name="cd_status_idle">Idle - tap the button to start dictating</string>
     <string name="cd_status_error">Error</string>
     <string name="cd_dismiss_suggestion_bar">Dismiss suggestions</string>
+
+    <!-- Dictation that could not be inserted into its text field -->
+    <string name="clip_label_dictation">Outspoke dictation</string>
+    <string name="toast_dictation_copied">Outspoke couldn\'t insert your dictation into that field. It\'s on the clipboard.</string>
+    <string name="toast_dictation_lost">Outspoke closed before the speech model loaded, so your dictation couldn\'t be transcribed.</string>
 
     <!-- Home screen -->
     <string name="home_section_setup">Setup</string>
@@ -157,6 +162,10 @@
 
     <!-- Keyboard status messages -->
     <string name="status_transcribing">Finishing…</string>
+    <string name="status_transcribing_model_loading">Finishing · loading speech model…</string>
+    <string name="status_mic_starting">Starting microphone…</string>
+    <string name="status_listening">Listening</string>
+    <string name="status_listening_model_loading">Listening · loading speech model</string>
     <string name="status_error_insertion">Couldn\'t insert the transcript.</string>
     <string name="status_no_speech">Didn\'t catch that — try again</string>
     <string name="status_engine_model_missing">Model not downloaded - open Outspoke to download</string>
@@ -183,6 +192,7 @@
     <string name="tutorial_delete_char_desc">Removes the last character.</string>
     <string name="tutorial_enter_title">Enter / Action (far right)</string>
     <string name="tutorial_enter_desc">Performs the context-aware action: send, search, go, or insert a newline.
+        While you dictate, it finishes, inserts the text and sends.
     </string>
     <string name="tutorial_skip">Skip</string>
     <string name="tutorial_next">Next</string>

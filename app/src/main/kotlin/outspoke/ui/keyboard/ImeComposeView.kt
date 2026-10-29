@@ -104,13 +104,13 @@ private fun ImeIdlePreview() {
 @Preview(showBackground = true, backgroundColor = 0xFF111111, name = "IME · Listening")
 @Composable
 private fun ImeListeningPreview() {
-    ImePreviewScaffold(uiState = KeyboardUiState.Listening, amplitude = 0.65f)
+    ImePreviewScaffold(uiState = KeyboardUiState.Listening(), amplitude = 0.65f)
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFF111111, name = "IME · Continuous")
 @Composable
 private fun ImeContinuousPreview() {
-    ImePreviewScaffold(uiState = KeyboardUiState.Listening, amplitude = 0.4f, isContinuous = true)
+    ImePreviewScaffold(uiState = KeyboardUiState.Listening(), amplitude = 0.4f, isContinuous = true)
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFF111111, name = "IME · Processing")

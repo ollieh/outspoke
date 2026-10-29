@@ -270,17 +270,19 @@ fun KeyboardScreen(
                 Spacer(modifier = Modifier.width(8.dp))
 
                 // Centre: talk button
-                // isListening is true for Listening and Processing (mic active, audio flowing).
+                // isListening is true while the mic is open or opening, so a tap stops it.
                 // Transcribing means audio has stopped but the engine is still working - mic off,
                 // button disabled until the Final result arrives and the state returns to Idle.
+                // A loading model does not block recording: its audio is buffered.
                 TalkButton(
-                    isListening = uiState is KeyboardUiState.Listening || uiState is KeyboardUiState.Processing,
+                    isListening = uiState.isCapturing,
                     isContinuous = isContinuous,
                     triggerMode = triggerMode,
                     onRecordStart = onRecordStart,
                     onRecordStop = onRecordStop,
                     onContinuousModeEnabled = onContinuousModeEnabled,
-                    enabled = uiState !is KeyboardUiState.EngineLoading && uiState !is KeyboardUiState.Error && uiState !is KeyboardUiState.Transcribing,
+                    enabled = uiState !is KeyboardUiState.Error && uiState !is KeyboardUiState.Transcribing &&
+                            uiState != KeyboardUiState.EngineLoading(KeyboardUiState.LoadingReason.ModelNotDownloaded),
                     previewForceLockHint = previewForceLockHint,
                     modifier = Modifier.onGloballyPositioned { lc ->
                         tutorialPositions?.record(TutorialButtonId.TALK, lc)
@@ -394,7 +396,8 @@ fun KeyboardScreen(
             onEnterAction = viewModel::performEnterAction,
             onInsertSpace = viewModel::insertSpace,
             enterAction = enterAction,
-            onSwitchKeyboard = onSwitchKeyboard,
+            // A dictation in progress is finished and inserted before switching.
+            onSwitchKeyboard = { viewModel.onSwitchKeyboard(onSwitchKeyboard) },
             onOpenCompanionApp = onOpenCompanionApp,
             diagnostics = diagnostics,
             wordSuggestions = wordSuggestions,
@@ -485,14 +488,14 @@ private fun KeyboardScreenWhisperIdlePreview() {
 @Preview(showBackground = true, backgroundColor = 0xFF111111)
 @Composable
 private fun KeyboardScreenListeningPreview() {
-    KeyboardScreenPreviewScaffold(uiState = KeyboardUiState.Listening, amplitude = 0.6f, showLockHint = true)
+    KeyboardScreenPreviewScaffold(uiState = KeyboardUiState.Listening(), amplitude = 0.6f, showLockHint = true)
 }
 
 @Preview(showBackground = true, backgroundColor = 0xFF111111)
 @Composable
 private fun KeyboardScreenContinuousPreview() {
     KeyboardScreenPreviewScaffold(
-        uiState = KeyboardUiState.Listening,
+        uiState = KeyboardUiState.Listening(),
         amplitude = 0.4f,
         isContinuous = true,
         showLockHint = true,
