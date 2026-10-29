@@ -153,6 +153,8 @@ class AudioCaptureManager(private val context: Context) {
         rawSource: Boolean = false,
         recordingId: Long = RecordingTrace.nextSessionId(),
         onAudioStarted: () -> Unit = {},
+        /** Receives all captured audio before VAD, e.g. for a server upload. */
+        pcmTap: PcmTap? = null,
     ): Flow<AudioChunk> {
         // Allocate before collection so releasing the button during startup is not lost.
         val stopRequested = AtomicBoolean(false)
@@ -275,6 +277,7 @@ class AudioCaptureManager(private val context: Context) {
             try {
                 for (samples in frames) {
                     processedSamples += samples.size
+                    pcmTap?.onPcm(samples)
                     val chunk = AudioChunk(samples = samples)
                     val rms = calculateRms(chunk.samples)
                     _amplitude.value = normaliseAmplitude(rms)
