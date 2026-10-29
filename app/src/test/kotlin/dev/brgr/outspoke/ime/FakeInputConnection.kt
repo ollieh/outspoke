@@ -19,6 +19,7 @@ import android.view.inputmethod.*
  *   - [getTextAfterCursor] - returns empty (cursor always at end in this fake)
  *   - [getSelectedText]    - returns null (no selection)
  *   - [deleteSurroundingText] - removes characters before the cursor
+ *   - [performEditorAction] / [sendKeyEvent] - recorded with the field text at that moment
  *
  * All other [InputConnection] methods are no-op stubs that return false / null / 0.
  */
@@ -26,6 +27,11 @@ class FakeInputConnection : InputConnection {
     val commitCalls = mutableListOf<String>()
     var composingCalls = 0
         private set
+
+    /** Every editor action and key event, in order, with the field text when it arrived. */
+    val submissions = mutableListOf<Submission>()
+
+    data class Submission(val editorAction: Int?, val keyEvent: KeyEvent?, val fieldText: String)
 
     /** Permanently committed text - never rewritten once written. */
     private val buffer = StringBuilder()
@@ -175,11 +181,17 @@ class FakeInputConnection : InputConnection {
     override fun setComposingRegion(start: Int, end: Int): Boolean = false
     override fun commitCompletion(text: CompletionInfo?): Boolean = false
     override fun commitCorrection(correctionInfo: CorrectionInfo?): Boolean = false
-    override fun performEditorAction(editorAction: Int): Boolean = false
+    override fun performEditorAction(editorAction: Int): Boolean {
+        submissions += Submission(editorAction, null, fieldText)
+        return true
+    }
     override fun performContextMenuAction(id: Int): Boolean = false
     override fun beginBatchEdit(): Boolean = true
     override fun endBatchEdit(): Boolean = true
-    override fun sendKeyEvent(event: KeyEvent?): Boolean = false
+    override fun sendKeyEvent(event: KeyEvent?): Boolean {
+        submissions += Submission(null, event, fieldText)
+        return true
+    }
     override fun clearMetaKeyStates(states: Int): Boolean = false
     override fun reportFullscreenMode(enabled: Boolean): Boolean = false
     override fun performPrivateCommand(action: String?, data: Bundle?): Boolean = false

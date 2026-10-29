@@ -1,7 +1,10 @@
 package dev.brgr.outspoke.ime
 
+import android.os.SystemClock
 import android.text.InputType
 import android.util.Log
+import android.view.KeyCharacterMap
+import android.view.KeyEvent
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import dev.brgr.outspoke.ime.TranscriptAligner.findNewContent
@@ -936,6 +939,30 @@ class TextInjector(
                 inputConnection.performEditorAction(imeActionCode)
             }
         }
+    }
+
+    /**
+     * Submits the editor, e.g. sends the chat message, regardless of [enterAction]:
+     * performs the editor's declared IME action (send, search, go, …) even in multi-line
+     * fields. An editor that declares none receives an Enter key press instead, which
+     * chat apps with an "Enter sends" setting treat as send.
+     */
+    fun send(): Boolean {
+        val declared = editorInfo.imeOptions and EditorInfo.IME_MASK_ACTION
+        if (declared != EditorInfo.IME_ACTION_NONE && declared != EditorInfo.IME_ACTION_UNSPECIFIED) {
+            RecordingTrace.log { "send editorAction=$declared" }
+            return inputConnection.performEditorAction(declared)
+        }
+        RecordingTrace.log { "send enterKey" }
+        val now = SystemClock.uptimeMillis()
+        val down = KeyEvent(
+            now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER, 0, 0,
+            KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
+            KeyEvent.FLAG_SOFT_KEYBOARD or KeyEvent.FLAG_KEEP_TOUCH_MODE,
+        )
+        val pressed = inputConnection.sendKeyEvent(down)
+        val released = inputConnection.sendKeyEvent(KeyEvent.changeAction(down, KeyEvent.ACTION_UP))
+        return pressed && released
     }
 
     /**
