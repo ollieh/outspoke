@@ -15,6 +15,9 @@ import dev.brgr.outspoke.inference.InferenceRepository
 import dev.brgr.outspoke.inference.PipelineDiagnostics
 import dev.brgr.outspoke.inference.RecordingTrace
 import dev.brgr.outspoke.inference.TranscriptResult
+import dev.brgr.outspoke.remote.ServerRaceSession
+import dev.brgr.outspoke.remote.ServerTranscriber
+import dev.brgr.outspoke.remote.uploadWhenComplete
 import dev.brgr.outspoke.settings.preferences.AppPreferences
 import dev.brgr.outspoke.ui.keyboard.components.WHISPER_LANGUAGE_OPTIONS
 import kotlinx.coroutines.CancellationException
@@ -24,6 +27,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -45,6 +49,8 @@ class KeyboardViewModel(
     private val dictationRescue: DictationRescue,
     /** Runs dictations. Outlives [viewModelScope] so a dictation can finish after the IME is gone. */
     private val sessionScope: CoroutineScope,
+    /** Optional server race; inert unless a server URL is configured. */
+    private val serverTranscriber: ServerTranscriber? = null,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<KeyboardUiState>(
@@ -132,6 +138,9 @@ class KeyboardViewModel(
 
     val customWords = appPreferences.customWords
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    private val serverSettings = serverTranscriber?.settings
+        ?.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /** Streaming results have already been cleaned and custom spellings must stay intact. */
     val transcriptAlreadyCleaned: Boolean
@@ -468,6 +477,9 @@ class KeyboardViewModel(
         /** Set on the capture thread when the microphone first delivers samples. */
         val audioStarted = AtomicBoolean(false)
         var job: Job? = null
+
+        /** Uploads the recording to the user's server and races it against the phone. */
+        var serverRace: ServerRaceSession? = null
         var recording = true
         var micLive = false
         var modelReady = false
@@ -579,6 +591,12 @@ class KeyboardViewModel(
         var inserted = false
         val addTrailingSpace = trailingSpace.value
         RecordingTrace.log { "session start id=${s.id}" }
+        // The race's upload is cancelled when this dictation's coroutine completes.
+        s.serverRace = serverTranscriber?.startSession(
+            owner = CoroutineScope(currentCoroutineContext()), settings = serverSettings?.value,
+            recordingId = s.id, language = currentLanguage.value, customWords = customWords.value,
+            formatNumbersAsDigits = postprocessingEnabled.value && formatNumbersAsDigits.value,
+        )
         try {
             coroutineScope {
                 launch { captureAudio(s) }
@@ -648,7 +666,8 @@ class KeyboardViewModel(
                         publish(s)
                     }
                 },
-            ).collect { s.audio.send(it) }
+                pcmTap = s.serverRace?.pcm,
+            ).uploadWhenComplete(s.serverRace).collect { s.audio.send(it) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -730,16 +749,20 @@ class KeyboardViewModel(
      * Ends a dictation whose transcription completed: insert it, and send if requested.
      * Returns whether the text reached its editor.
      */
-    private fun complete(s: Session, addTrailingSpace: Boolean): Boolean {
-        if (s.failed) return false
+    private suspend fun complete(s: Session, addTrailingSpace: Boolean): Boolean {
+        val localText = s.transcript.finalText.takeIf { s.transcript.hasFinalText && !s.failed }
+        // VAD can filter an entire recording, and a long decode can return
+        // blank without emitting NoSpeech. Both still need visible feedback.
+        if (localText == null && !s.failed && session === s) showNoSpeech()
+        val race = s.serverRace
+        // The server's text may replace the phone's, or rescue a recording the phone
+        // failed or heard nothing in.
+        val text = (if (race == null) localText else race.choose(localText).let { decision ->
+            if (session === s) _diagnostics.value = _diagnostics.value.copy(transcriptSource = decision.source)
+            decision.text
+        }) ?: return false
+        s.failed = false
         val foreground = session === s
-        if (!s.transcript.hasFinalText) {
-            // VAD can filter an entire recording, and a long decode can return
-            // blank without emitting NoSpeech. Both still need visible feedback.
-            if (foreground) showNoSpeech()
-            return false
-        }
-        val text = s.transcript.finalText
         val editor = s.injector.takeUnless { s.orphaned }
         val insertionStart = System.nanoTime()
         val inserted = editor?.insertTranscript(text, addTrailingSpace) == true
@@ -958,11 +981,15 @@ class KeyboardViewModel(
         private val appPreferences: AppPreferences,
         private val wordSuggestionProvider: WordSuggestionProvider,
         private val dictationRescue: DictationRescue,
+        private val serverTranscriber: ServerTranscriber? = null,
         /** Outlives the keyboard so an unfinished dictation completes after the IME is destroyed. */
         private val sessionScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
-            KeyboardViewModel(audioCaptureManager, appPreferences, wordSuggestionProvider, dictationRescue, sessionScope) as T
+            KeyboardViewModel(
+                audioCaptureManager, appPreferences, wordSuggestionProvider, dictationRescue, sessionScope,
+                serverTranscriber,
+            ) as T
     }
 }

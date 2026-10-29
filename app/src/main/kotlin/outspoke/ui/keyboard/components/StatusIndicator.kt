@@ -143,7 +143,7 @@ private fun IdleIndicator(diagnostics: PipelineDiagnostics = PipelineDiagnostics
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp),
         )
-        if (!diagnostics.isClean) {
+        if (diagnostics.hasSummary) {
             Spacer(modifier = Modifier.width(6.dp))
             Text(
                 text = diagnostics.summary(),

@@ -1,5 +1,8 @@
 package dev.brgr.outspoke.inference
 
+/** Which side's text a recording inserted when server transcription raced the phone. */
+enum class TranscriptSource { PHONE, SERVER }
+
 /**
  * Lightweight counters tracked during a single recording session.
  *
@@ -15,13 +18,26 @@ data class PipelineDiagnostics(
     val alignmentRecoveries: Int = 0,
     /** Number of blank-after-cleaning strides discarded by InferenceRepository. */
     val blanksDiscarded: Int = 0,
+    /** Set only when a server raced this recording. */
+    val transcriptSource: TranscriptSource? = null,
 ) {
     /** True when all counters are zero - nothing unusual happened. */
     val isClean: Boolean get() = windowTrims == 0 && alignmentRecoveries == 0 && blanksDiscarded == 0
 
-    /** Short one-line summary for display, e.g. "2T · 1R · 3B" or "✓" when clean. */
-    fun summary(): String = if (isClean) "✓" else buildString {
-        if (windowTrims > 0) append("${windowTrims}T")
+    /** Whether the badge has anything to show. */
+    val hasSummary: Boolean get() = !isClean || transcriptSource != null
+
+    /** Short one-line summary for display, e.g. "via server · 2T · 1R · 3B" or "✓" when clean. */
+    fun summary(): String = if (!hasSummary) "✓" else buildString {
+        when (transcriptSource) {
+            TranscriptSource.SERVER -> append("via server")
+            TranscriptSource.PHONE -> append("on phone")
+            null -> {}
+        }
+        if (windowTrims > 0) {
+            if (isNotEmpty()) append(" · ")
+            append("${windowTrims}T")
+        }
         if (alignmentRecoveries > 0) {
             if (isNotEmpty()) append(" · ")
             append("${alignmentRecoveries}R")

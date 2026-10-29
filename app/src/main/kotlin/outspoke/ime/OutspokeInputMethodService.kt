@@ -27,6 +27,7 @@ import dev.brgr.outspoke.inference.EngineState
 import dev.brgr.outspoke.inference.InferenceService
 import dev.brgr.outspoke.inference.RecordingTrace
 import dev.brgr.outspoke.inference.cleanTranscript
+import dev.brgr.outspoke.remote.ServerTranscriber
 import dev.brgr.outspoke.settings.preferences.AppPreferences
 import dev.brgr.outspoke.ui.keyboard.ImeComposeView
 import dev.brgr.outspoke.ui.keyboard.KeyboardScreen
@@ -170,6 +171,7 @@ class OutspokeInputMethodService :
                 AppPreferences(this),
                 wordSuggestionProvider,
                 ClipboardDictationRescue(this),
+                ServerTranscriber.create(this),
             ),
         )[KeyboardViewModel::class.java]
 
