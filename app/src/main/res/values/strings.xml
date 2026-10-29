@@ -11,9 +11,9 @@
     <string name="pref_custom_words_duplicate">This word is already saved.</string>
     <string name="pref_custom_words_limit">You can save up to 100 terms. Remove one to add another.</string>
     <string name="pref_auto_start_recording_title">Record when Outspoke opens</string>
-    <string name="pref_auto_start_recording_summary">Start listening as soon as the keyboard opens, even while the speech model is still loading. Tap the microphone to stop.</string>
+    <string name="pref_auto_start_recording_summary">Start listening as soon as the keyboard opens, even while the speech model is still loading. Tap Done or the microphone to stop.</string>
     <string name="pref_return_keyboard_title">Return to previous keyboard</string>
-    <string name="pref_return_keyboard_summary">When Outspoke closes, finish dictation and switch back to the keyboard you used before it.</string>
+    <string name="pref_return_keyboard_summary">After Done or Send, or when Outspoke closes, finish the dictation and switch back to the keyboard you used before it.</string>
     <string name="app_name">Outspoke</string>
     <string name="ime_name">Outspoke Voice Keyboard</string>
     <string name="subtype_en">English (US) - Voice</string>
@@ -33,6 +33,8 @@
     <string name="action_cancel">Cancel</string>
     <string name="action_delete">Delete</string>
     <string name="action_retry">Retry</string>
+    <string name="action_done">Done</string>
+    <string name="action_send">Send</string>
     <string name="action_set_as_active">Set as Active</string>
     <string name="action_download_anyway">Download anyway</string>
     <string name="action_open_outspoke">Open Outspoke</string>
@@ -56,6 +58,7 @@
     <string name="cd_status_idle">Idle - tap the button to start dictating</string>
     <string name="cd_status_error">Error</string>
     <string name="cd_dismiss_suggestion_bar">Dismiss suggestions</string>
+    <string name="cd_discard_dictation">Discard dictation</string>
 
     <!-- Dictation that could not be inserted into its text field -->
     <string name="clip_label_dictation">Outspoke dictation</string>

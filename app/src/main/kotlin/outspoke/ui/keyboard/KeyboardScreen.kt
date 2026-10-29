@@ -29,7 +29,8 @@ import dev.brgr.outspoke.ui.theme.OutspokeKeyboardTheme
  *
  * Layout (top → bottom):
  *  1. [StatusIndicator] - crossfades between Idle / Listening / Processing / Error states.
- *  2. [WaveformBar]     - animates with real-time amplitude.
+ *  2. [WaveformBar]     - animates with real-time amplitude. While dictating, the
+ *     [RecordingControls] row (Discard · waveform · Done · Send) takes its place.
  *  3. Bottom row (left → right):
  *       [Delete All] · [Delete Word] · [TalkButton] · [Delete Char] · [Switch Keyboard]
  *     The outer pair is pinned to each edge; the TalkButton stays centred with equal
@@ -50,6 +51,10 @@ import dev.brgr.outspoke.ui.theme.OutspokeKeyboardTheme
  * @param onDeleteWord           Delete backward to the previous word boundary.
  * @param onDeleteAll            Delete all text in the current editor.
  * @param onEnterAction          Perform the context-aware Enter action (newline or IME action).
+ *                               While dictating it is labelled Send and finishes, then sends.
+ * @param onDone                 Finish the dictation and insert it.
+ * @param onSend                 Finish the dictation, insert it, then send.
+ * @param onDiscard              Drop the dictation without inserting it.
  * @param enterAction            The semantic action for the Enter key in the current editor.
  * @param onSwitchKeyboard       Switches the active IME back to the previous keyboard.
  * @param onOpenCompanionApp     Opens the Outspoke companion app (e.g. to grant permission or download the model).
@@ -77,6 +82,9 @@ fun KeyboardScreen(
     onDeleteAll: () -> Unit,
     onEnterAction: () -> Unit,
     onInsertSpace: () -> Unit = {},
+    onDone: () -> Unit = {},
+    onSend: () -> Unit = {},
+    onDiscard: () -> Unit = {},
     enterAction: EnterAction = EnterAction.DONE,
     onSwitchKeyboard: () -> Unit,
     onOpenCompanionApp: () -> Unit,
@@ -226,10 +234,19 @@ fun KeyboardScreen(
                         onLanguageSelected = onWhisperLanguageSelected,
                     )
                 }
-                WaveformBar(
-                    amplitude = amplitude,
-                    modifier = Modifier.wrapContentWidth(),
-                )
+                if (uiState.isDictating) {
+                    RecordingControls(
+                        amplitude = amplitude,
+                        onDiscard = onDiscard,
+                        onDone = onDone,
+                        onSend = onSend,
+                    )
+                } else {
+                    WaveformBar(
+                        amplitude = amplitude,
+                        modifier = Modifier.wrapContentWidth(),
+                    )
+                }
             }
 
             //  Bottom row: 5 buttons with TalkButton centred
@@ -304,8 +321,11 @@ fun KeyboardScreen(
                                 tutorialPositions?.record(TutorialButtonId.DELETE_CHAR, lc)
                             },
                     )
-                    // Centre-right: context-aware Enter action
-                    val (enterIcon, enterDescription) = when (enterAction) {
+                    // Centre-right: context-aware Enter action; Send while dictating.
+                    val dictating = uiState.isDictating
+                    val (enterIcon, enterDescription) = if (dictating) {
+                        MyIcons.Send to stringResource(R.string.action_send)
+                    } else when (enterAction) {
                         EnterAction.SEARCH -> MyIcons.Search to stringResource(R.string.cd_action_search)
                         EnterAction.GO -> MyIcons.ArrowForward to stringResource(R.string.cd_action_go)
                         EnterAction.NEXT -> MyIcons.ArrowForward to stringResource(R.string.cd_action_next)
@@ -317,8 +337,9 @@ fun KeyboardScreen(
                         icon = enterIcon,
                         contentDescription = enterDescription,
                         onClick = onEnterAction,
+                        tint = if (dictating) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         // Disable auto-repeat for action buttons - search/send/go should only fire once.
-                        repeatEnabled = enterAction == EnterAction.NEWLINE,
+                        repeatEnabled = enterAction == EnterAction.NEWLINE && !dictating,
                         modifier = Modifier
                             .align(Alignment.CenterEnd)
                             .onGloballyPositioned { lc ->
@@ -395,6 +416,9 @@ fun KeyboardScreen(
             onDeleteAll = viewModel::deleteAll,
             onEnterAction = viewModel::performEnterAction,
             onInsertSpace = viewModel::insertSpace,
+            onDone = viewModel::onDone,
+            onSend = viewModel::onSend,
+            onDiscard = viewModel::onDiscard,
             enterAction = enterAction,
             // A dictation in progress is finished and inserted before switching.
             onSwitchKeyboard = { viewModel.onSwitchKeyboard(onSwitchKeyboard) },

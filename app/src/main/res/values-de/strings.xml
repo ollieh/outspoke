@@ -19,6 +19,8 @@
     <string name="action_cancel">Abbrechen</string>
     <string name="action_delete">Löschen</string>
     <string name="action_retry">Erneut versuchen</string>
+    <string name="action_done">Fertig</string>
+    <string name="action_send">Senden</string>
     <string name="action_set_as_active">Als aktiv festlegen</string>
     <string name="action_download_anyway">Trotzdem herunterladen</string>
     <string name="action_open_outspoke">Outspoke öffnen</string>
@@ -41,6 +43,7 @@
     <string name="cd_delete_model">Modell löschen</string>
     <string name="cd_status_idle">Bereit - Schaltfläche drücken zum Diktieren</string>
     <string name="cd_status_error">Fehler</string>
+    <string name="cd_discard_dictation">Diktat verwerfen</string>
 
     <!-- Home screen -->
     <string name="home_section_setup">Einrichtung</string>
@@ -126,6 +129,10 @@
     <string name="clip_label_dictation">Outspoke-Diktat</string>
     <string name="toast_dictation_copied">Outspoke konnte dein Diktat nicht in dieses Feld einfügen. Es liegt in der Zwischenablage.</string>
     <string name="toast_dictation_lost">Outspoke wurde geschlossen, bevor das Sprachmodell geladen war. Dein Diktat konnte nicht transkribiert werden.</string>
+    <string name="pref_auto_start_recording_title">Beim Öffnen von Outspoke aufnehmen</string>
+    <string name="pref_auto_start_recording_summary">Sofort zuhören, sobald die Tastatur geöffnet wird, auch während das Sprachmodell noch lädt. Zum Beenden auf Fertig oder das Mikrofon tippen.</string>
+    <string name="pref_return_keyboard_title">Zur vorherigen Tastatur zurückkehren</string>
+    <string name="pref_return_keyboard_summary">Nach Fertig oder Senden oder wenn Outspoke geschlossen wird, das Diktat abschließen und zur vorher verwendeten Tastatur wechseln.</string>
 
     <!-- Keyboard status messages -->
     <string name="status_transcribing">Wird abgeschlossen …</string>

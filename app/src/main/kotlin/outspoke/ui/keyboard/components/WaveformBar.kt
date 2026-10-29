@@ -35,6 +35,7 @@ private const val BAR_COUNT = 60
  * @param maxBarHeight The tallest height a single bar can reach at full amplitude.
  * @param barWidth     Width of each bar column.
  * @param barSpacing   Gap between adjacent bars.
+ * @param barCount     Number of bars; the row is as wide as the bars need.
  */
 @Composable
 fun WaveformBar(
@@ -43,6 +44,7 @@ fun WaveformBar(
     maxBarHeight: Dp = 28.dp,
     barWidth: Dp = 3.dp,
     barSpacing: Dp = 2.dp,
+    barCount: Int = BAR_COUNT,
 ) {
     // Single animation state for the whole waveform - one tick per frame instead of 60.
     val animatedAmplitude by animateFloatAsState(
@@ -57,12 +59,13 @@ fun WaveformBar(
     Canvas(
         modifier = modifier
             .height(maxBarHeight)
-            .width((barWidth + barSpacing) * BAR_COUNT - barSpacing),
+            .width((barWidth + barSpacing) * barCount - barSpacing),
     ) {
         drawBars(
             amplitude = animatedAmplitude,
             barWidthPx = barWidth.toPx(),
             barSpacingPx = barSpacing.toPx(),
+            barCount = barCount,
             barColorOne = barColorOne,
             barColorTwo = barColorTwo,
         )
@@ -77,15 +80,16 @@ private fun DrawScope.drawBars(
     amplitude: Float,
     barWidthPx: Float,
     barSpacingPx: Float,
+    barCount: Int,
     barColorOne: androidx.compose.ui.graphics.Color,
     barColorTwo: androidx.compose.ui.graphics.Color,
 ) {
     val maxHeightPx = size.height
     val stride = barWidthPx + barSpacingPx
 
-    for (index in 0 until BAR_COUNT) {
+    for (index in 0 until barCount) {
         // Normalise index to [0, 1] and compute a Gaussian envelope centred at 0.5.
-        val x = index.toDouble() / (BAR_COUNT - 1)
+        val x = index.toDouble() / (barCount - 1).coerceAtLeast(1)
         val sigma = 0.2
         val mu = 0.5
         val gaussianEnvelope = exp(-(x - mu).pow(2) / (2 * sigma.pow(2))).toFloat()
