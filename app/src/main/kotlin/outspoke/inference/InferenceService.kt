@@ -38,6 +38,10 @@ private const val NOTIFICATION_ID = 1001
 /**
  * A foreground [LifecycleService] that owns the [SpeechEngine] lifecycle.
  *
+ * The IME binds to it and also starts it, so the service and its loaded model outlive
+ * the IME: switching to another keyboard destroys the IME and unbinds, and the started
+ * service keeps the model warm for the next time Outspoke opens.
+ *
  * Responsibilities:
  *  - Show a persistent low-priority notification so Android keeps the process alive
  *    while the keyboard is active
@@ -103,7 +107,7 @@ class InferenceService : LifecycleService() {
                 val modelId = currentModelId
                     ?: AppPreferences(applicationContext).selectedModelId.first()
                 Log.i(TAG, "reloadIfNeeded() - reloading $modelId after memory-pressure unload")
-                reloadForModel(modelId)
+                reloadForModel(modelId, reason = "reload after memory-pressure unload")
             }
         }
     }
@@ -125,18 +129,22 @@ class InferenceService : LifecycleService() {
                 else getString(R.string.notif_engine_loading)),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
             )
+            RecordingTrace.log { "service start foreground=true startId=$startId engine=${_engineState.value.javaClass.simpleName}" }
         } catch (e: SecurityException) {
-            Log.w(TAG, "Foreground promotion unavailable; retaining bound service", e)
-            stopSelf(startId)
+            // Stay started anyway: a started background service survives the IME unbinding
+            // when the user switches keyboards, until Android stops idle background services.
+            Log.w(TAG, "Foreground promotion unavailable; staying started in the background", e)
+            RecordingTrace.log { "service start foreground=false startId=$startId error=${e.javaClass.simpleName}" }
         } catch (e: IllegalStateException) {
-            Log.w(TAG, "Foreground promotion unavailable; retaining bound service", e)
-            stopSelf(startId)
+            Log.w(TAG, "Foreground promotion unavailable; staying started in the background", e)
+            RecordingTrace.log { "service start foreground=false startId=$startId error=${e.javaClass.simpleName}" }
         }
         return START_NOT_STICKY
     }
 
     override fun onCreate() {
         super.onCreate()
+        RecordingTrace.log { "service create" }
 
         createNotificationChannel()
         try {
@@ -175,15 +183,15 @@ class InferenceService : LifecycleService() {
             AppPreferences(applicationContext).selectedModelId.distinctUntilChanged().collect { modelId ->
                 currentModelId = modelId
                 memoryUnloaded = false  // a model change supersedes any memory-pressure unload
-                reloadForModel(modelId)
+                reloadForModel(modelId, reason = "selected model")
             }
         }
 
-        // Keep the model warm across keyboard hide/show and brief app
-        // switches by staying bound (the IME no longer unbinds on idle). To avoid being
-        // OOM-killed with ~700 MB resident, proactively close the engine when the OS
-        // signals running-low / critical memory pressure and let the IME reload it on the
-        // next onWindowShown via InferenceBinder.reloadIfNeeded().
+        // Keep the model warm across keyboard hide/show, app switches and keyboard
+        // switches (the IME starts this service, so it outlives the IME's binding). To
+        // avoid being OOM-killed with ~700 MB resident, close the engine when the OS
+        // signals critical memory pressure and let the IME reload it on the next
+        // onWindowShown via InferenceBinder.reloadIfNeeded().
         registerMemoryCallback()
 
         // Watch the models/root directory to detect external changes (e.g. download complete).
@@ -192,12 +200,14 @@ class InferenceService : LifecycleService() {
 
     /**
      * Registered on the application context in [onCreate]; closes the loaded engine when
-     * the OS reports running-low / critical memory pressure so the ~700 MB Parakeet model
-     * is reclaimed cooperatively instead of via an OOM kill. Unregistered in [onDestroy].
+     * the OS reports critical memory pressure so the ~700 MB Parakeet model is reclaimed
+     * cooperatively instead of via an OOM kill. Unregistered in [onDestroy].
      *
-     * Only the running-low and critical levels trigger an unload — those are the levels at
-     * which the process is genuinely at risk. Background / moderate levels leave the model
-     * resident so brief app switches keep it warm.
+     * Only [ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL] and [onLowMemory] trigger an
+     * unload — the levels at which the whole system is genuinely short of memory. The
+     * background levels (UI_HIDDEN, BACKGROUND, MODERATE, COMPLETE) and RUNNING_LOW are
+     * routine for a process whose keyboard was just hidden or switched away; unloading on
+     * them meant a 4–5 s reload nearly every time the user came back to Outspoke.
      */
     private var memoryCallback: ComponentCallbacks2? = null
 
@@ -205,26 +215,21 @@ class InferenceService : LifecycleService() {
     private fun registerMemoryCallback() {
         // Trim-memory levels are not strictly monotonic in severity:
         //   UI_HIDDEN(20), BACKGROUND(40)        — routine backgrounding, NOT real pressure.
-        //   MODERATE(60), COMPLETE(80)          — backgrounded + pressure → unload.
-        //   RUNNING_LOW(10), RUNNING_CRITICAL(15) — process in foreground + pressure → unload.
-        // We unload on the pressure levels but NOT on UI_HIDDEN/BACKGROUND, which fire on every
-        // keyboard hide and would otherwise defeat the “keep the model warm across brief
-        // switches” goal. Reload is handled lazily by InferenceBinder.reloadIfNeeded() on the
-        // next onWindowShown.
-        val unloadLevels = setOf(
-            ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
-            ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
-            ComponentCallbacks2.TRIM_MEMORY_MODERATE,
-            ComponentCallbacks2.TRIM_MEMORY_COMPLETE,
-        )
+        //   MODERATE(60), COMPLETE(80)          — position in the cached-process LRU list.
+        //   RUNNING_LOW(10), RUNNING_CRITICAL(15) — process in foreground + pressure.
+        // Only RUNNING_CRITICAL (the system is about to kill background processes) and
+        // onLowMemory unload. Reload is handled lazily by InferenceBinder.reloadIfNeeded()
+        // on the next onWindowShown.
         val cb = object : ComponentCallbacks2 {
             override fun onTrimMemory(level: Int) {
-                if (level !in unloadLevels) return
-                unloadDueToMemoryPressure(level)
+                val unload = level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL
+                RecordingTrace.log { "service trim memory level=$level unload=$unload engine=${_engineState.value.javaClass.simpleName}" }
+                if (unload) unloadDueToMemoryPressure("trim memory level=$level")
             }
 
             override fun onLowMemory() {
-                unloadDueToMemoryPressure(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
+                RecordingTrace.log { "service low memory unload=true" }
+                unloadDueToMemoryPressure("low memory")
             }
 
             override fun onConfigurationChanged(newConfig: Configuration) = Unit
@@ -239,16 +244,18 @@ class InferenceService : LifecycleService() {
      * No-op if the engine is not currently loaded / ready (e.g. still loading or already
      * unloaded). Serialized with [reloadForModel] via [engineLoadMutex].
      */
-    private fun unloadDueToMemoryPressure(level: Int) {
+    private fun unloadDueToMemoryPressure(reason: String) {
         if (currentEngine == null || _engineState.value != EngineState.Ready) return
-        Log.w(TAG, "Memory pressure (level=$level) - cooperatively closing engine to free RAM")
+        Log.w(TAG, "Memory pressure ($reason) - cooperatively closing engine to free RAM")
         lifecycleScope.launch(Dispatchers.Default) {
             engineLoadMutex.withLock {
                 if (currentEngine == null) return@withLock
                 if (currentRepository?.closeEngine(onlyIfIdle = true) == false) {
                     Log.i(TAG, "Keeping model loaded until the active recording finishes")
+                    RecordingTrace.log { "engine unload skipped reason=$reason recording=true" }
                     return@withLock
                 }
+                RecordingTrace.log { "engine unloaded model=$loadedModelId reason=$reason" }
                 currentEngine = null
                 currentRepository = null
                 memoryUnloaded = true
@@ -260,6 +267,7 @@ class InferenceService : LifecycleService() {
     }
 
     override fun onDestroy() {
+        RecordingTrace.log { "service destroy engine=${_engineState.value.javaClass.simpleName} model=$loadedModelId" }
         modelFileObserver?.stopWatching()
         modelFileObserver = null
         currentWatchDir = null
@@ -268,11 +276,13 @@ class InferenceService : LifecycleService() {
         super.onDestroy()
         CoroutineScope(Dispatchers.Default).launch {
             engineLoadMutex.withLock {
+                val hadEngine = currentRepository != null
                 currentRepository?.closeEngine()
                 currentEngine = null
                 currentRepository = null
                 grammarCorrector.close()
                 Log.d(TAG, "Service destroyed - engine closed")
+                if (hadEngine) RecordingTrace.log { "engine unloaded model=$loadedModelId reason=service destroyed" }
             }
         }
     }
@@ -280,23 +290,31 @@ class InferenceService : LifecycleService() {
     /**
      * Closes any existing engine and loads a fresh one for [modelId].
      * Always called inside [engineLoadMutex] to serialise concurrent invocations.
+     * [reason] only labels the trace log.
      */
-    private suspend fun reloadForModel(modelId: ModelId) {
+    private suspend fun reloadForModel(modelId: ModelId, reason: String) {
         engineLoadMutex.withLock {
             if (currentEngine != null && loadedModelId == modelId &&
-                ModelStorageManager.isModelReady(applicationContext, modelId)) return@withLock
+                ModelStorageManager.isModelReady(applicationContext, modelId)) {
+                RecordingTrace.log { "engine load skipped model=$modelId reason=$reason alreadyLoaded=true" }
+                return@withLock
+            }
             // We are (re)loading on purpose, so any prior memory-pressure unload no
             // longer applies — clear the flag so reloadIfNeeded() does not re-trigger.
             memoryUnloaded = false
 
             // Close the current engine before replacing it.
             _engineState.value = EngineState.Loading
+            if (currentRepository != null) {
+                RecordingTrace.log { "engine unloaded model=$loadedModelId reason=replaced ($reason)" }
+            }
             currentRepository?.closeEngine()
             currentEngine = null
             currentRepository = null
 
             if (!ModelStorageManager.isModelReady(applicationContext, modelId)) {
                 Log.w(TAG, "Model $modelId files not present - engine stays Unloaded")
+                RecordingTrace.log { "engine load skipped model=$modelId reason=$reason filesPresent=false" }
                 _engineState.value = EngineState.Unloaded
                 updateNotification(getString(R.string.notif_model_not_downloaded))
                 return
@@ -320,6 +338,7 @@ class InferenceService : LifecycleService() {
             updateNotification(getString(R.string.notif_engine_loading))
 
             val startTime = System.currentTimeMillis()
+            RecordingTrace.log { "engine load begin model=$modelId reason=$reason" }
             var loadingEngine: SpeechEngine? = null
             try {
                 val engine = SpeechEngineFactory.create(modelId)
@@ -343,12 +362,14 @@ class InferenceService : LifecycleService() {
                 updateNotification(getString(R.string.notif_engine_ready, ModelRegistry[modelId].displayName))
                 val elapsed = System.currentTimeMillis() - startTime
                 Log.i(TAG, "Engine loaded successfully for $modelId in ${elapsed}ms")
+                RecordingTrace.log { "engine load end model=$modelId reason=$reason durationMs=$elapsed ok=true" }
                 logMemoryUsage()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 val msg = e.localizedMessage ?: "Unknown error"
                 Log.e(TAG, "Engine load failed for $modelId: $msg", e)
+                RecordingTrace.log { "engine load end model=$modelId reason=$reason durationMs=${System.currentTimeMillis() - startTime} ok=false" }
                 _engineState.value = EngineState.Error(msg)
                 updateNotification(getString(R.string.notif_engine_failed, msg))
                 logMemoryUsage()
@@ -407,13 +428,13 @@ class InferenceService : LifecycleService() {
             when {
                 !isReady && currentState == EngineState.Ready -> {
                     Log.w(TAG, "Selected model files removed - unloading engine")
-                    reloadForModel(selectedModelId) // will detect !isReady and set Unloaded
+                    reloadForModel(selectedModelId, reason = "model files removed") // will detect !isReady and set Unloaded
                     startModelWatcher()
                 }
 
                 isReady && currentState == EngineState.Unloaded -> {
                     Log.d(TAG, "Selected model files appeared - loading engine")
-                    reloadForModel(selectedModelId)
+                    reloadForModel(selectedModelId, reason = "model files appeared")
                     startModelWatcher()
                 }
             }
