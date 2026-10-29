@@ -47,15 +47,15 @@ a pass-through for the streaming engines; a legacy engine would re-clean server 
   `language=en`. An empty model setting uses the first id from `GET /v1/models`,
   cached per server for the process.
 - OkHttp: 1.5 s connect timeout, 30 s per transcription call, 5 s for the model list.
-- `ServerEndpoint.parse` adds `http://` to a bare host and `/v1` when missing.
+- `ServerEndpoint.parse` adds `https://` to a bare host and `/v1` when missing.
 
 ## Storage and network policy
 
 - URL, model and grace are in the shared DataStore (`ServerTranscriptionPreferences`).
 - The API key is AES-GCM encrypted with a non-exportable Android Keystore key in
   `outspoke_server_secret.xml`, which is excluded from backup and device transfer.
-- `network_security_config.xml` permits cleartext because a Tailscale address or
-  MagicDNS name cannot be listed in advance. Built-in download URLs are all https.
+- `network_security_config.xml` refuses cleartext app-wide. The server needs an https
+  address, e.g. a tailnet certificate through Caddy or `tailscale serve`.
 
 ## Recording memory
 

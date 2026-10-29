@@ -16,15 +16,15 @@ class ServerEndpoint private constructor(val v1: HttpUrl) {
 
     companion object {
         /**
-         * Accepts what a user is likely to paste: a bare `host:port` (assumed `http`,
-         * as on a Tailscale network), a base URL with or without `/v1`, or a full
+         * Accepts what a user is likely to paste: a bare host (assumed `https`, since
+         * the app refuses cleartext), a base URL with or without `/v1`, or a full
          * endpoint URL. Like OpenAI clients configured with a server root, `/v1` is
          * appended when missing. Returns null for blank or non-HTTP input.
          */
         fun parse(input: String): ServerEndpoint? {
             val trimmed = input.trim()
             if (trimmed.isEmpty()) return null
-            val withScheme = if (SCHEME.containsMatchIn(trimmed)) trimmed else "http://$trimmed"
+            val withScheme = if (SCHEME.containsMatchIn(trimmed)) trimmed else "https://$trimmed"
             val url = withScheme.toHttpUrlOrNull() ?: return null
             var segments = url.pathSegments.filter { it.isNotEmpty() }
             if (segments.takeLast(3) == listOf("v1", "audio", "transcriptions")) segments = segments.dropLast(2)

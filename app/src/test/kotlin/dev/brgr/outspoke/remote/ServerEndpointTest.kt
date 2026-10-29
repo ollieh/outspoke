@@ -22,8 +22,8 @@ class ServerEndpointTest {
 
     @Test
     fun `assumes http for a bare host`() {
-        assertThat(v1("vps:8000")).isEqualTo("http://vps:8000/v1")
-        assertThat(v1("100.64.0.1:8000/v1")).isEqualTo("http://100.64.0.1:8000/v1")
+        assertThat(v1("vps:8000")).isEqualTo("https://vps:8000/v1")
+        assertThat(v1("100.64.0.1:8000/v1")).isEqualTo("https://100.64.0.1:8000/v1")
     }
 
     @Test

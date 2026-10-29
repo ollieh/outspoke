@@ -3,11 +3,11 @@
     <string name="pref_server_title">Server-Transkription</string>
     <string name="pref_server_summary">Optional. Wenn du die Aufnahme beendest, schickt Outspoke sie zusätzlich an deinen eigenen OpenAI-kompatiblen Server und verwendet dessen Text, falls er rechtzeitig ankommt. Sonst wird der Text des Telefons verwendet. Der Server transkribiert nur Englisch. Lass die URL leer, damit Audio auf diesem Gerät bleibt.</string>
     <string name="pref_server_url_label">Server-URL</string>
-    <string name="pref_server_url_example">http://100.64.0.1:8000</string>
+    <string name="pref_server_url_example">https://speech.example.ts.net</string>
     <string name="pref_server_url_invalid">Gib eine http://- oder https://-Adresse ein.</string>
     <string name="pref_server_off">Aus: Die Transkription bleibt auf diesem Gerät.</string>
     <string name="pref_server_url_on">Aufnahmen werden an diesen Server gesendet.</string>
-    <string name="pref_server_url_cleartext">http:// ist unverschlüsselt. Verwende es nur über Tailscale oder ein anderes privates Netzwerk.</string>
+    <string name="pref_server_url_cleartext">Outspoke blockiert unverschlüsseltes http://. Verwende die https://-Adresse des Servers.</string>
     <string name="pref_server_key_label">API-Schlüssel (optional)</string>
     <string name="pref_server_key_show">Zeigen</string>
     <string name="pref_server_key_hide">Verbergen</string>

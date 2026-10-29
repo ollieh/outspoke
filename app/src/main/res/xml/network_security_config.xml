@@ -1,10 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Server transcription reaches the user's own server, usually over Tailscale by plain
-    http to a 100.x address or a MagicDNS name. Neither can be listed here in advance,
-    so cleartext is permitted app-wide. Every built-in URL (model and language-pack
-    downloads) is https; only a user-entered http:// server URL uses cleartext.
+    Every connection is https: model and language-pack downloads, and the user's
+    transcription server, which has a tailnet certificate (e.g. through Caddy or
+    `tailscale serve`). A user-entered http:// server URL is refused.
 -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true" />
+    <base-config cleartextTrafficPermitted="false" />
 </network-security-config>
