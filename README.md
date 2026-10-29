@@ -33,10 +33,12 @@ It uses NVIDIA's [Parakeet-TDT v3](https://huggingface.co/nvidia/parakeet-tdt-0.
 - **Custom words** - save names and terms in Speech preferences. Close recognized spellings and split phrases use your preferred spelling locally, without a language-pack download. Up to 100 terms, each up to 3 words and 50 characters; changes apply to the next recording.
 - **Space key** - insert a space directly from the keyboard
 - **Optional space after dictation** - enable it in Input preferences to append one space when the complete recording finishes, including its final transcription
-- **Optional automatic recording** - start listening when Outspoke opens and the model is ready
+- **Optional automatic recording** - start listening when Outspoke opens, even while the model is still loading
+- **Done and Send** - finish a dictation with one tap; Send (or Enter while dictating) also sends the message. With "Return to previous keyboard" on, both switch back afterwards
+- **Dictation is kept** - clearing the field keeps the recording; if the text field or keyboard goes away first, the finished text is copied to the clipboard instead of being lost. Only Discard throws a dictation away
 - **Return to your previous keyboard** - optionally switch back after closing Outspoke, once final transcription finishes
 - **Screen stays awake while recording** - normal screen timeout resumes when capture stops
-- **Warm model** - the foreground service retains the model between keyboard openings; memory-pressure cleanup skips active recording and final transcription. Android can still reclaim the process.
+- **Warm model** - the foreground service retains the model between keyboard openings and when you switch to another keyboard and back. It unloads only under critical memory pressure, never during recording or final transcription. Android can still reclaim the process.
 - **Configurable trigger modes** - hold-to-talk or tap-to-toggle
 - **Word correction bar** - optional suggestion bar that appears after dictation, offering up to 5 on-device correction candidates for the word under the cursor. Uses downloadable language packs (dictionary + ARPA trigram language model) covering 25 languages. Language packs are fetched on demand from [minburg/outspoke-data](https://github.com/minburg/outspoke-data) — the only external source used at runtime besides the one-time ASR model download. All correction runs entirely on-device once files are downloaded; the feature is opt-in and off by default.
 - **Optional microphone calibration** - a settings screen that records a short reference clip on each available microphone, ranks them by capture fidelity, and selects the best one for dictation. Opt-in; off by default.

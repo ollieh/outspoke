@@ -62,13 +62,13 @@ Single Gradle module (app). All Kotlin source lives under app/src/main/kotlin/ (
 |---|---|---|
 | audio | AudioCaptureManager, MicCalibrationManager, SileroVadFilter, RMSVadFilter, VadFilter, AudioChunk, PermissionHelper | Mic capture, PCM chunking, Voice Activity Detection, optional mic calibration |
 | inference | SpeechEngine, ParakeetEngine, ChunkStreamingEngine, ParakeetUnifiedEngine, StreamingSpeechEngine, NemoLogMel, WhisperEngine, VoxtralEngine, SpeechEngineFactory, InferenceRepository, InferenceService, TranscriptResult, EngineState, PipelineDiagnostics, NumberNormaliser, GrammarCorrector, AcousticCandidates | ASR pipeline, sliding window, post-processing, foreground service, acoustic word-alternative capture |
-| ime | OutspokeInputMethodService, TextInjector, TranscriptAligner, EnterAction, WordSuggestionProvider | Keyboard service, recording insertion, legacy alignment, word-correction facade |
+| ime | OutspokeInputMethodService, TextInjector, TranscriptAligner, EnterAction, WordSuggestionProvider, DictationRescue | Keyboard service, recording insertion, clipboard rescue, legacy alignment, word-correction facade |
 | ime/correction | WordCorrector, CandidateGenerator, ArpaLanguageModel, SuggestionFileDownloader, SuggestionFileManager, SuggestionLanguage, DoubleMetaphone, KolnerPhonetik, EditDistance | On-device word correction + downloadable language pack management |
 | settings/model | ModelId, ModelRegistry, ModelDownloadManager, ModelStorageManager, ModelState, ModelViewModel, DownloadService | Model enumeration, download, SHA-256 verification, on-disk paths |
 | settings/preferences | AppPreferences, PreferencesViewModel | DataStore-backed user preferences |
 | settings/screens | HomeScreen, ModelScreen, PreferencesScreen, MicCalibrationScreen | Settings Compose UI |
 | ui/keyboard | KeyboardViewModel, KeyboardUiState, RecordingTranscript, KeyboardScreen, ImeComposeView, WordAtCursor | IME Compose hosting, UI state |
-| ui/keyboard/components | TalkButton, SuggestionBar, WaveformBar, StatusIndicator, KeyboardActionButton, KeyboardTutorialOverlay, LanguageSelector | Keyboard UI sub-components |
+| ui/keyboard/components | TalkButton, SuggestionBar, WaveformBar, StatusIndicator, KeyboardActionButton, KeyboardTutorialOverlay, LanguageSelector, RecordingControls | Keyboard UI sub-components |
 | ui/theme | OutspokeKeyboardTheme | Compose theming |
 
 ---
@@ -81,6 +81,8 @@ Single Gradle module (app). All Kotlin source lives under app/src/main/kotlin/ (
 
 - Opens AudioRecord with source DEFAULT (the vendor-recommended source), 16 kHz mono PCM-16. No application-side gain: DEFAULT arrives at a usable level.
 - Emits 480-sample (30 ms) chunks as a cold Flow<AudioChunk>.
+- Uses a 2 s AudioRecord buffer. A dedicated reader drains AudioRecord into an unbounded queue; RMS, VAD and the downstream send run on a separate coroutine, so they never delay a read. Recording starts before the VAD model is created.
+- `onAudioStarted` fires when the microphone first delivers samples; the keyboard shows "Listening" only after that. `stopCapture(recordingId)` stops only that recording, never a newer one.
 - When the user has run mic calibration, applies the selected microphone via AudioRecord.setPreferredDevice (no-op when unset or the device is gone).
 - On stop: drains the hardware buffer then waits HANGOVER_DRAIN_SAFETY_FRAMES = 20 frames (600 ms) to flush VAD hangover before the flow completes.
 
@@ -175,10 +177,12 @@ Number formatting validates phrase boundaries before combining number words, pre
 - Notification channel: outspoke_inference, notification ID 1001.
 - Owns the SpeechEngine instance; reloads on selectedModelId preference change.
 - Uses a Mutex to protect engine swaps. The repository serializes recording sessions and engine teardown, including the final decode; memory-pressure unload skips an active session.
+- Unloads the model only on `TRIM_MEMORY_RUNNING_CRITICAL` or `onLowMemory`. Background trim levels are routine after a keyboard switch and keep the model loaded.
 - Observes distinct selected model IDs so unrelated preference changes do not reload the model.
 - Exposes StateFlow<EngineState> to bound clients.
 - FileObserver on models/ directory detects newly downloaded models.
-- Stays alive independently of IME bind/unbind; shuts down only when explicitly stopped.
+- Stays alive independently of IME bind/unbind; shuts down only when explicitly stopped. If foreground promotion fails it stays started as a background service rather than calling `stopSelf`.
+- Debug `OutspokeTrace` lines record service create/start/destroy, trim levels, and engine load/unload with a reason.
 
 ---
 
@@ -191,12 +195,14 @@ Number formatting validates phrase boundaries before combining number words, pre
 - Binds to InferenceService for the IME lifetime and starts it when shown so it can survive IME recreation.
 - Applies FLAG_KEEP_SCREEN_ON while capture is active and clears it when capture stops.
 - Forwards InputConnection changes to TextInjector and KeyboardViewModel.
-- Input preferences `auto_start_recording` and `return_to_previous_keyboard` are booleans, both false by default. Auto recording waits for the model to be ready and starts once per keyboard opening, with tap-to-stop enabled even in Hold mode. Hiding cancels a pending start and stops capture. Returning to the previous keyboard waits for the final transcript, is cancelled on reopening, and checks that Outspoke is still the selected IME.
+- Input preferences `auto_start_recording` and `return_to_previous_keyboard` are booleans, both false by default. Auto recording starts once per keyboard opening as soon as the service reports Loading or Ready, with tap-to-stop enabled even in Hold mode. Hiding cancels a pending start and stops capture. Returning to the previous keyboard happens after Done or Send, or after hiding; it waits for the final transcript, is cancelled on reopening, and checks that Outspoke is still the selected IME.
+- `onStartInput(restarting = true)` keeps a dictation attached to the same field. Any other new or finished input session detaches it.
 
 **TextInjector**
 
 - Manages all writes to the active InputConnection.
 - `insertTranscript` writes a completed recording in one `commitText` call, including separators and the optional trailing space.
+- `send` performs the editor's declared IME action, even in multi-line fields; without one it sends an Enter key down/up pair.
 - Recording previews and audio-window overlap live in `RecordingTranscript`, with no editor writes while recording or finishing.
 - Older composing-span methods remain for legacy callers and alignment tests, delegating overlap discovery to TranscriptAligner.
 
@@ -359,7 +365,13 @@ Applied to every raw transcript string before wrapping in a TranscriptResult:
 
 Successful flow completion inserts finalized utterances once through `TextInjector.insertTranscript`. A single `commitText` includes the recording, a preceding separator when needed, and the optional trailing space. Selected text is replaced directly. Suggestions refresh after insertion; automatic keyboard return waits for completion.
 
-`Transcribing(partial)` preserves the preview after Stop. Errors retain the preview and leave the editor unchanged; a rejected editor insertion has its own error reason. A new input session, finishing input, or clearing a field cancels pending insertion. Clearing during active dictation starts a fresh recording. The older composing-span methods remain for legacy callers and alignment tests; the recording UI no longer freezes words or updates composing text.
+Recording starts the microphone at once, even while the model loads. Audio is buffered in an unbounded channel until the repository is Ready, then transcribed. The status line shows `MicStarting` until the microphone delivers samples, then `Listening(modelLoading)`, `Processing(partial)` and `Transcribing(partial, modelLoading)`.
+
+Dictated speech is dropped only by the explicit Discard control. Clearing the field (backspace, the delete key, or the app) keeps recording and inserts into the same field. A finished or changed input session, or a destroyed keyboard, detaches the dictation: capture stops, transcription finishes in a scope that outlives the view model, and the text goes to the clipboard with a toast (`ClipboardDictationRescue`). It is never inserted into another field. A rejected insertion and a failed decode with a preview are rescued the same way. Audio that was still waiting for the model when the keyboard was destroyed cannot be transcribed; the user is told.
+
+While dictating, the keyboard shows Discard, Done and Send in place of the waveform row, and Enter acts as Send. Done inserts; Send inserts, then calls `TextInjector.send`. Both then return to the previous keyboard when `return_to_previous_keyboard` is on. The switch-keyboard key finishes and inserts first, showing "Finishing…", then switches.
+
+`Transcribing(partial)` preserves the preview after Stop. Errors retain the preview and leave the editor unchanged; a rejected editor insertion has its own error reason. The older composing-span methods remain for legacy callers and alignment tests; the recording UI no longer freezes words or updates composing text.
 
 ---
 
@@ -458,17 +470,17 @@ Voxtral-Mini-4B-Realtime ONNX (~4 GB RAM requirement). Same Whisper-compatible l
 
 ### Binding lifecycle
 
-    OutspokeInputMethodService.onCreateInputView()
-        -> bindService(InferenceService)
+    OutspokeInputMethodService.onCreate()
+        -> bindService(InferenceService, BIND_AUTO_CREATE)
 
-    OutspokeInputMethodService.onWindowHidden()
-        -> starts 30 s unload timer
-           (cancels if keyboard re-shown within 30 s)
+    OutspokeInputMethodService.onWindowShown()
+        -> startService(InferenceService)   (foreground with type microphone when allowed)
 
-    Timer fires
-        -> stopService(InferenceService)
+    Switch to another keyboard
+        -> OutspokeInputMethodService.onDestroy() -> unbindService()
+           InferenceService stays started; the loaded model survives
 
-Unbinding alone does NOT stop InferenceService. The 30 s timer is the only stop path during normal use.
+Unbinding alone does NOT stop InferenceService. It unloads the model only under critical memory pressure.
 
 ### Engine reload on model change
 
