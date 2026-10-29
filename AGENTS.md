@@ -32,6 +32,7 @@ All source lives under `app/src/main/kotlin/` (package root `dev.brgr.outspoke`)
 |`inference`|`SpeechEngine`, `ParakeetEngine`, `ChunkStreamingEngine`, `ParakeetUnifiedEngine`, `StreamingSpeechEngine`, `NemoLogMel`, `WhisperEngine`, `VoxtralEngine`, `InferenceRepository`, `InferenceService`, `SpeechEngineFactory`, `TranscriptResult`, `EngineState`, `PipelineDiagnostics`, `NumberNormaliser`, `GrammarCorrector`, `AcousticCandidates`|ASR pipeline, sliding window, post-processing, foreground service, acoustic word-alternative capture|
 | `audio` | `AudioCaptureManager`, `MicCalibrationManager`, `SileroVadFilter`, `RMSVadFilter`, `VadFilter`, `AudioChunk`, `PermissionHelper` | Mic capture + VAD + optional mic calibration |
 | `ime` | `OutspokeInputMethodService`, `TextInjector`, `TranscriptAligner`, `EnterAction`, `WordSuggestionProvider`, `DictationRescue` | Keyboard / text insertion, clipboard rescue of uninsertable dictation |
+| `remote` | `ServerTranscriber`, `ServerRace`, `ServerTranscriptionClient`, `RecordingEncoder`, `RecordingPcmBuffer`, `ServerEndpoint` | Optional upload to the user's own server, raced against the phone |
 | `ime/correction` | `WordCorrector`, `CandidateGenerator`, `ArpaLanguageModel`, `SuggestionFileDownloader`, `SuggestionFileManager`, `SuggestionLanguage`, `DoubleMetaphone`, `KolnerPhonetik`, `EditDistance` | On-device word correction + language pack management |
 | `settings/model` | `ModelRegistry`, `ModelId`, `ModelDownloadManager`, `ModelStorageManager`, `ModelState`, `ModelViewModel`, `DownloadService` | Model lifecycle |
 | `settings/preferences` | `AppPreferences`, `PreferencesViewModel` | DataStore-backed user preferences |
@@ -59,6 +60,8 @@ All source lives under `app/src/main/kotlin/` (package root `dev.brgr.outspoke`)
 **Recording completion:** the space key inserts directly into the editor. `trailing_space` defaults to false and is included in the single recording insertion, including when the last utterance ended at a silence boundary. With `return_to_previous_keyboard`, Done, Send and hiding the keyboard switch back after insertion. The IME observes `KeyboardViewModel.isRecording` for `FLAG_KEEP_SCREEN_ON`, independently of transcript UI state.
 
 **Number formatting:** `NumberNormaliser` combines only grammatically valid number phrases. Punctuation and separate counting words end a phrase; the countdown from ten to one must remain ten separate numbers, never their sum. Stutter and phrase cleanup preserve number-only repetitions such as dictated codes.
+
+**Server transcription (fork feature, opt-in):** with a server URL set, each finished recording is also uploaded to the user's own OpenAI-compatible server over Tailscale, and the server's text replaces the phone's when it wins the race. The keyboard hooks are the `pcmTap`/`uploadWhenComplete` capture tee and the `serverRace.choose` call before insertion in `KeyboardViewModel`. Before changing the recording flow, capture, the race, or what text the server path inserts, read [server transcription](docs/server-transcription.md).
 
 **VAD is dual-layer:** `SileroVadFilter` (Silero v4 ONNX) is primary; `RMSVadFilter` (energy threshold) is the automatic fallback if the ONNX VAD model fails to load. Runtime neural errors switch the existing smoother to energy detection for the rest of the recording, preserving speech instead of classifying failures as silence.
 
@@ -92,7 +95,7 @@ All source lives under `app/src/main/kotlin/` (package root `dev.brgr.outspoke`)
 - ABI splits produce per-ABI APKs: `armeabi-v7a` (×1), `arm64-v8a` (×2), universal (×0 offset). `versionCode = defaultVersionCode * 10 + abiOffset`.
 - `dependenciesInfo` is disabled in the APK for F-Droid / IzzyOnDroid reproducibility.
 - Do not add analytics, crash reporters, or any SDK that phones home.
-- External file downloads (suggestion packs) come **only** from `github.com/minburg/outspoke-data`. Do not add other external hosts.
+- External file downloads (suggestion packs) come **only** from `github.com/minburg/outspoke-data`. Do not add other external hosts. The one other network peer is the user-configured transcription server, used only while its URL is set.
 
 ## Release Process
 
